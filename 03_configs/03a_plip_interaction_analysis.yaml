@@ -1,0 +1,38 @@
+# =============================================================================
+# 03a PLIP Interaction Analysis - Configuration (Hit Validation)
+# =============================================================================
+# Analyze protein-ligand interactions using PLIP on docked poses.
+#
+# Unlike reference_docking (crystal complex), hit_validation runs PLIP
+# on docked poses: receptor PDB + best scored pose from 01c.
+#
+# INPUT:  01c_dock6_run/{name}/{name}_scored.mol2
+# OUTPUT: 05_results/{campaign}/03a_plip_analysis/{name}/interactions.json
+#
+# Project: hit_validation
+# Module: 03a
+# Version: 2.0 (2026-03-27)
+# =============================================================================
+
+parameters:
+  # Source of docked poses for PLIP analysis
+  pose_source: "01c_dock6_run"
+
+  # Pose selection: "best_score" = lowest Grid_Score
+  pose_selection: "best_score"
+
+  # Output filename base
+  output_name: "interactions"
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "03a_plip_analysis"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# python 02_scripts/03a_plip_interaction_analysis.py \
+#     --config 03_configs/03a_plip_interaction_analysis.yaml \
+#     --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
+# =============================================================================

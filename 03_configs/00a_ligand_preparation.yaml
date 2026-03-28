@@ -1,0 +1,42 @@
+# =============================================================================
+# 00a Ligand Preparation - Configuration (Hit Validation)
+# =============================================================================
+# Prepares screening hit ligands for DOCK6 validation docking.
+# Uses antechamber with AM1-BCC charges + Sybyl atom types.
+#
+# 3-tier fallback:
+#   Tier 1: antechamber -c bcc -at sybyl  (AM1-BCC + Sybyl)
+#   Tier 2: antechamber -c gas -at sybyl  (Gasteiger + Sybyl, fast)
+#   Tier 3: obabel conversion             (last resort)
+#
+# INPUT:  campaign_dir/ligands/ (mol2 or SDF files)
+# OUTPUT: 05_results/{campaign}/00a_ligand_preparation/{name}/{name}.mol2
+#
+# Project: hit_validation
+# Module: 00a
+# Version: 1.0 (2026-03-27)
+# =============================================================================
+
+parameters:
+  # Atom type system — MUST be sybyl for DOCK6.
+  # GAFF2 causes DOCK6 to silently fall back to rigid docking.
+  atom_type: "sybyl"
+
+  # Charge method: "bcc" (AM1-BCC, gold standard) or "gas" (Gasteiger, fast)
+  charge_method: "bcc"
+
+  # Timeout per molecule in seconds (AM1-BCC QM can be slow for large molecules)
+  timeout_per_molecule: 300
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "00a_ligand_preparation"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# python 02_scripts/00a_ligand_preparation.py \
+#     --config 03_configs/00a_ligand_preparation.yaml \
+#     --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
+# =============================================================================
