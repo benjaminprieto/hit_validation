@@ -17,7 +17,7 @@ Based on Rizzo Lab protocol (run.009) and DOCK6 manual §2.11.9:
 v2.1 (2026-03-27): Self-reference mode for hit_validation. When
   reference_mol2 == "self", each hit uses its own scored pose as the
   footprint reference. This gives per-residue energy decomposition
-  without requiring a separate reference ligand (e.g., UDX).
+  without requiring a separate reference ligand.
 
 v2.0 (2026-03-25): Added GB/SA Hawkins implicit solvation as secondary
   score. Corrects in-vacuo electrostatic artifacts (e.g., ASP494 repulsion

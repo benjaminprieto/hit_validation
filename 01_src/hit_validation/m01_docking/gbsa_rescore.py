@@ -14,8 +14,7 @@ GB/SA calculates:
   - Total = MM + deltaGBSA
 
 This corrects in-vacuo electrostatic artifacts where charged residues
-(e.g., ASP494 COO⁻ near PO₄²⁻) show artificial repulsion without
-solvent screening.
+show artificial repulsion without solvent screening.
 
 Reference:
   Hawkins, Cramer, Truhlar. J Phys Chem 1996.

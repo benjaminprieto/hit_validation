@@ -6,8 +6,8 @@ Re-scores existing DOCK6 poses with per-residue energy decomposition
 (VDW + ES + H-bond footprints in Cartesian space).
 
 v2.1 (2026-03-27): Self-reference mode for hit_validation. Each hit uses
-  its own scored pose as the footprint reference (no UDX needed). This gives
-  per-residue energy decomposition without cross-ligand comparison.
+  its own scored pose as the footprint reference. This gives per-residue
+  energy decomposition without requiring a separate reference ligand.
 
 v2.0 (2026-03-25): Added GB/SA Hawkins implicit solvation support.
   Enable in YAML (gbsa_hawkins: true) or CLI (--gbsa-hawkins).
@@ -95,7 +95,7 @@ def main():
 
     # Reference mol2 for footprint scoring:
     # In hit_validation, each hit uses its own scored pose as self-reference.
-    # This produces per-residue energy decomposition without needing UDX.
+    # This produces per-residue energy decomposition without a separate reference.
     # The reference_mol2 parameter is set per-molecule in run_footprint_rescore.
     reference_mol2 = "self"  # sentinel value — core module handles per-molecule
 

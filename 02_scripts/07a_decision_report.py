@@ -2,7 +2,8 @@
 """
 07a Decision Report - CLI (Hit Validation)
 =============================================
-Generate consolidated validation evidence report for screening hits.
+Generate consolidated validation evidence report with multi-criteria
+pose selection and mol2 export for screening hits.
 
 Usage:
     python 02_scripts/07a_decision_report.py \
@@ -11,7 +12,7 @@ Usage:
 
 Project: hit_validation
 Module: 07a
-Version: 1.0 (2026-03-27)
+Version: 2.0 (2026-03-29)
 """
 
 import argparse
@@ -33,8 +34,25 @@ def load_yaml(path):
         return yaml.safe_load(f)
 
 
+def _parse_zones(cc: dict) -> dict:
+    """Parse zone definitions from campaign config into internal format."""
+    raw_zones = cc.get("zones", {})
+    if not raw_zones:
+        return {}
+    zones = {}
+    for zone_id, zdef in raw_zones.items():
+        zones[zone_id] = {
+            "residues": set(zdef.get("residues", [])),
+            "label": zdef.get("label", zone_id),
+            "druglike": zdef.get("druglike", True),
+            "description": zdef.get("description", ""),
+            "color": zdef.get("color"),
+        }
+    return zones
+
+
 def main():
-    parser = argparse.ArgumentParser(description="07a Decision Report — per-molecule validation evidence")
+    parser = argparse.ArgumentParser(description="07a Decision Report — pose selection + validation evidence")
     parser.add_argument("--config", "-c", type=str, required=True)
     parser.add_argument("--campaigns", type=str, required=True)
     parser.add_argument("--output", "-o", type=str, default=None)
@@ -55,10 +73,12 @@ def main():
 
     # Input paths
     scores_csv = str(results_base / "01e_score_collection" / "dock6_scores.csv")
+    all_poses_csv = str(results_base / "01e_score_collection" / "dock6_all_poses.csv")
     plip_dir = str(results_base / "03a_plip_analysis")
     footprint_dir = str(results_base / "04_dock6_analysis" / "04b_footprint_analysis")
+    docking_dir = str(results_base / "01c_dock6_run")
 
-    # Reference context — imported pre-computed data (informational only)
+    # Reference context — configurable reference data (informational only)
     ref_context = cc.get("reference_context", {})
     ref_scores_path = ref_context.get("scores_csv", params.get("reference_scores_path"))
     ref_plip_path = ref_context.get("plip_json", params.get("reference_plip_path"))
@@ -69,6 +89,13 @@ def main():
     mmpbsa_analysis_dir = str(results_base / "01h_mmpbsa_analysis")
     if not Path(mmpbsa_analysis_dir).exists():
         mmpbsa_analysis_dir = None
+
+    # Zones from campaign config
+    zones = _parse_zones(cc)
+
+    # Pose selection weights
+    pose_weights_cfg = params.get("pose_selection", {})
+    pose_weights = pose_weights_cfg.get("weights")
 
     # Decision thresholds
     zone_cutoff = params.get("zone_energy_cutoff", -0.5)
@@ -85,6 +112,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Campaign:  {campaign_id}")
     logger.info(f"Scores:    {scores_csv}")
+    logger.info(f"Zones:     {len(zones)} defined" if zones else "Zones:     none (zone analysis skipped)")
     logger.info(f"Output:    {output_dir}")
 
     result = run_decision_report(
@@ -103,6 +131,10 @@ def main():
         mmpbsa_analysis_dir=mmpbsa_analysis_dir,
         mmpbsa_dg_strong_threshold=mmpbsa_dg_strong,
         mmpbsa_dg_moderate_threshold=mmpbsa_dg_moderate,
+        zones=zones,
+        docking_dir=docking_dir,
+        all_poses_csv=all_poses_csv,
+        pose_selection_weights=pose_weights,
     )
 
     if not result.get("success"):

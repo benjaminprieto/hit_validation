@@ -1,11 +1,11 @@
 """
 hit_validation - Screening Hit Validation Pipeline
 =================================================================
-DOCK6 rigid re-docking of co-crystallized ligands with footprint-based
-interaction validation and GB/SA solvation scoring.
+Rigorous validation of virtual screening hits using DOCK6 with
+footprint-based interaction analysis and GB/SA implicit solvation.
 
-Produces per-residue energy profiles for comparison against experimental
-crystal contacts. Output feeds into molecular_docking pharmacophore.
+Evaluates each hit on its own absolute merits to produce evidence
+for purchase decisions and pharmacophore template selection.
 
 Modules:
     m00_preparation        - Ligand preparation (00a), receptor (00b), binding site (00d)
@@ -13,6 +13,6 @@ Modules:
                              GB/SA (01f), scores (01e)
     m03_interaction_analysis - PLIP interaction analysis (03a)
     m04_dock6_analysis     - Footprint analysis: per-residue energy consensus (04b)
-    m07_decision_report    - Decision report generation (07a)
+    m07_decision_report    - Decision report with pose selection + mol2 export (07a)
 """
 __version__ = "1.0.0"

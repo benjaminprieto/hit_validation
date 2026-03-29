@@ -17,7 +17,7 @@ Hardcoded upstream paths:
 Usage:
     python 02_scripts/01e_score_collection.py \\
         --config 03_configs/01e_score_collection.yaml \\
-        --campaigns 04_data/campaigns/SD1_reference_pH63/campaign_config.yaml
+        --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
 
 Project: hit_validation
 Module: 01e (DOCK6 engine) — renumbered from 01d (2026-03-22)
@@ -184,6 +184,10 @@ def main():
     logger.info(f"Score key:    {score_key}")
     logger.info(f"Output:       {output_dir}")
 
+    # Resolve rescore dirs for consolidated all_poses
+    fps_rescore = fps_dir if Path(fps_dir).exists() else None
+    gbsa_rescore = gbsa_dir if Path(gbsa_dir).exists() else None
+
     result = run_score_collection(
         docking_dir=docking_dir,
         output_dir=output_dir,
@@ -195,6 +199,8 @@ def main():
         scores_filename=scores_filename,
         mol2_dirname=mol2_dirname,
         source_label=cc.get("metadata", {}).get("source"),
+        fps_rescore_dir=fps_rescore,
+        gbsa_rescore_dir=gbsa_rescore,
     )
 
     # --- Merge FPS and GBSA scores from rescore steps ---

@@ -23,6 +23,14 @@ parameters:
   min_zones_for_template: 2        # Minimum zones covered for "strong template"
   grid_score_purchase_threshold: -30.0  # Grid Score threshold for purchase candidate
 
+  # Pose selection weights (multi-criteria composite scoring)
+  pose_selection:
+    weights:
+      Grid_Score: 0.35       # Grid-based binding energy
+      GBSA_Score: 0.35       # GB/SA implicit solvation energy
+      FPS_es_energy: 0.15    # Footprint electrostatic complementarity
+      FPS_vdw_energy: 0.15   # Footprint van der Waals complementarity
+
   log_level: "INFO"
 
 outputs:

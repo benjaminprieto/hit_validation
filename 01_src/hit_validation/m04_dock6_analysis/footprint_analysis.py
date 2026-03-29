@@ -7,7 +7,7 @@ Pipeline:
     Step 1: Build residue mapping (mol2 sequential → PDB original numbering)
     Step 2: Parse per-residue vdW + ES from footprint TXT files
     Step 3: Cross-molecule consensus (which residues always contribute)
-    Step 4: Compare each molecule's footprint vs reference (UDX)
+    Step 4: Cross-molecule consensus and zone coverage analysis
 
 DOCK6 6.13 footprint output format:
     - {name}_fps_scored.mol2           → summary scores per pose
@@ -28,7 +28,7 @@ Input:
 Output:
     footprint_per_molecule.csv    — residue × molecule energy matrix (PDB numbering)
     residue_consensus.csv         — which residues always contribute
-    vs_reference_comparison.csv   — delta vdW/ES vs reference per residue
+    subpocket_coverage.csv        — zone coverage per molecule
     pharmacophore_residues.json   — residues contacted by >80% of molecules
     molecule_footprint_summary.csv — one row per molecule with totals
     residue_mapping.csv           — sequential→PDB mapping for reference
@@ -56,52 +56,23 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # BINDING SITE ZONE CLASSIFICATION
 # =============================================================================
-# Sub-pocket classification from UDX PLIP analysis (06a).
-# Used to group residues into functional zones for visualization.
-# These are specific to the XT1/UDX system — future: make configurable.
+# Zones are loaded from campaign_config.yaml at runtime.
+# The module-level ZONE_DEFINITIONS is a fallback (empty) —
+# the actual zones are passed to run_footprint_analysis() via the `zones` arg.
 
-ZONE_DEFINITIONS = {
-    "phosphate": {
-        "residues": {"ARG598", "LYS599"},
-        "color": "#1D9E75",
-        "label": "Phosphate (salt bridges)",
-        "druglike": False,
-        "description": "Requires charged groups (phosphate, carboxylate). Pharmit selects nucleotides.",
-    },
-    "xylose": {
-        "residues": {"TRP392", "TRP495", "TYR565", "SER575"},
-        "color": "#378ADD",
-        "label": "Xylose pocket",
-        "druglike": True,
-        "description": "HBA from heterocycles (oxazol, furan, amide). Drug-like compatible.",
-    },
-    "ribose": {
-        "residues": {"HIS335", "VAL333", "THR390"},
-        "color": "#7F77DD",
-        "label": "Ribose / base recognition",
-        "druglike": True,
-        "description": "Aromatic stacking (HIS335) + HBA/HBD. Drug-like compatible.",
-    },
-    "uracil": {
-        "residues": {"ASP361", "ARG363"},
-        "color": "#BA7517",
-        "label": "Uracil pocket",
-        "druglike": True,
-        "description": "Weak energy but selective. Only extended molecules reach it.",
-    },
-    "catalytic": {
-        "residues": {"GLU529"},
-        "color": "#888780",
-        "label": "Catalytic (GLU529)",
-        "druglike": True,
-        "description": "Functionally critical but low energy. Covered implicitly by xylose proximity.",
-    },
-}
+ZONE_DEFINITIONS = {}
+
+# Default colors for zones (cycled if user doesn't specify colors)
+_DEFAULT_ZONE_COLORS = [
+    "#378ADD", "#1D9E75", "#BA7517", "#7F77DD", "#888780",
+    "#E74C3C", "#2ECC71", "#9B59B6", "#F39C12", "#1ABC9C",
+]
 
 
-def _classify_residue_zone(residue_name: str) -> str:
+def _classify_residue_zone(residue_name: str, zones: Optional[Dict[str, Dict]] = None) -> str:
     """Classify a residue into a binding site zone."""
-    for zone_id, zdef in ZONE_DEFINITIONS.items():
+    active_zones = zones or ZONE_DEFINITIONS
+    for zone_id, zdef in active_zones.items():
         if residue_name in zdef["residues"]:
             return zone_id
     return "other"
@@ -117,6 +88,7 @@ def generate_zones_html(
         contact_csv_path: Optional[str] = None,
         campaign_id: str = "",
         n_molecules: int = 0,
+        zones: Optional[Dict[str, Dict]] = None,
 ) -> str:
     """
     Generate binding site zones HTML from residue consensus data.
@@ -166,8 +138,9 @@ def generate_zones_html(
             }
 
     # --- Group residues by zone ---
+    active_zones = zones or ZONE_DEFINITIONS
     zone_data = {}
-    for zone_id, zdef in ZONE_DEFINITIONS.items():
+    for zone_id, zdef in active_zones.items():
         # Match by residue_id prefix (e.g., "TRP392" from "TRP392.A")
         zone_rows = df_consensus[
             df_consensus["residue_id"].apply(
@@ -181,7 +154,7 @@ def generate_zones_html(
         total_vdw = zone_rows["mean_vdw"].sum()
         total_es = zone_rows["mean_es"].sum()
 
-        # Reference energy (from UDX crystal)
+        # Reference energy (from reference context, if available)
         ref_energy = 0
         if "ref_vdw" in zone_rows.columns and "ref_es" in zone_rows.columns:
             ref_energy = (zone_rows["ref_vdw"] + zone_rows["ref_es"]).sum()
@@ -214,11 +187,15 @@ def generate_zones_html(
 
         residues.sort(key=lambda r: r["mean_total"])
 
+        # Assign color from zone def or default palette
+        zone_idx = list(active_zones.keys()).index(zone_id)
+        zone_color = zdef.get("color", _DEFAULT_ZONE_COLORS[zone_idx % len(_DEFAULT_ZONE_COLORS)])
+
         zone_data[zone_id] = {
-            "label": zdef["label"],
-            "color": zdef["color"],
-            "druglike": zdef["druglike"],
-            "description": zdef["description"],
+            "label": zdef.get("label", zone_id),
+            "color": zone_color,
+            "druglike": zdef.get("druglike", True),
+            "description": zdef.get("description", ""),
             "total_energy": round(total_energy, 2),
             "total_vdw": round(total_vdw, 2),
             "total_es": round(total_es, 2),
@@ -228,7 +205,7 @@ def generate_zones_html(
 
     # Also collect "other" residues with significant energy
     classified_ids = set()
-    for zdef in ZONE_DEFINITIONS.values():
+    for zdef in active_zones.values():
         classified_ids |= zdef["residues"]
 
     other_rows = df_consensus[
@@ -304,7 +281,7 @@ h2{{color:#2c3e50;margin-top:30px;font-size:18px}}
   </div>
   <div class="zone-bar" style="background:#f0f0f0"><div style="width:{bar_pct:.0f}%;height:10px;border-radius:5px;background:{zd['color']};opacity:0.7"></div></div>
   <div class="zone-desc">{zd['description']} {dl_badge}
-    {f'<br>Reference (UDX crystal): <b>{zd["ref_energy"]:+.2f}</b> kcal/mol' if abs(zd['ref_energy']) > 0.01 else ''}</div>
+    {f'<br>Reference: <b>{zd["ref_energy"]:+.2f}</b> kcal/mol' if abs(zd['ref_energy']) > 0.01 else ''}</div>
   <table class="res-tbl">
     <tr>
       <th>Residue</th>
@@ -639,6 +616,7 @@ def run_footprint_analysis(
         campaign_id: str = "",
         reference_context_csv: Optional[str] = None,
         reference_context_label: str = "Reference",
+        zones: Optional[Dict[str, Dict]] = None,
 ) -> Dict[str, Any]:
     """
     Analyze DOCK6 footprint re-scoring results.
@@ -655,6 +633,8 @@ def run_footprint_analysis(
                                (from reference_docking pipeline). If None, reference
                                comparisons are skipped.
         reference_context_label: Label for the reference molecule (default: "Reference")
+        zones: Binding site zone definitions from campaign_config.
+               Dict of zone_id → {residues: set, label: str, ...}
 
     Returns:
         Dict with: success, n_molecules, output paths
@@ -880,7 +860,7 @@ def run_footprint_analysis(
     logger.info(f"  Saved: {summary_csv}")
 
     # --- Hit vs reference comparison (per-residue delta for each hit) ---
-    hit_vs_udx_csv = None
+    hit_vs_ref_csv = None
     if df_ref_context is not None:
         # Build lookup: residue_id → (vdw, es)
         ref_lookup = {}
@@ -888,14 +868,14 @@ def run_footprint_analysis(
             rid = rrow.get("residue_id", "")
             ref_lookup[rid] = (rrow.get("vdw", 0.0), rrow.get("es", 0.0))
 
-        hit_vs_udx_rows = []
+        hit_vs_ref_rows = []
         for name_val, grp in df_all.groupby("Name"):
             for _, row in grp.iterrows():
                 rid = row["residue_id"]
                 ref_vdw, ref_es = ref_lookup.get(rid, (0.0, 0.0))
                 ref_tot = ref_vdw + ref_es
                 hit_tot = row["vdw"] + row["es"]
-                hit_vs_udx_rows.append({
+                hit_vs_ref_rows.append({
                     "Name": name_val,
                     "residue_id": rid,
                     "hit_vdw": round(row["vdw"], 4),
@@ -908,21 +888,22 @@ def run_footprint_analysis(
                     "delta_es": round(row["es"] - ref_es, 4),
                     "delta_total": round(hit_tot - ref_tot, 4),
                 })
-        if hit_vs_udx_rows:
-            df_hvsu = pd.DataFrame(hit_vs_udx_rows)
-            hit_vs_udx_csv = output_dir / "hit_vs_udx_comparison.csv"
-            df_hvsu.to_csv(hit_vs_udx_csv, index=False, encoding="utf-8")
-            logger.info(f"  Saved: {hit_vs_udx_csv} ({len(df_hvsu)} rows)")
+        if hit_vs_ref_rows:
+            df_hvsu = pd.DataFrame(hit_vs_ref_rows)
+            hit_vs_ref_csv = output_dir / "hit_vs_reference_comparison.csv"
+            df_hvsu.to_csv(hit_vs_ref_csv, index=False, encoding="utf-8")
+            logger.info(f"  Saved: {hit_vs_ref_csv} ({len(df_hvsu)} rows)")
 
     # --- Sub-pocket coverage analysis ---
+    active_zones = zones or ZONE_DEFINITIONS
     subpocket_csv = None
     ranking_csv = None
-    if not df_all.empty:
+    if not df_all.empty and active_zones:
         coverage_rows = []
         ranking_rows = []
         for name_val, grp in df_all.groupby("Name"):
             zone_data = {}
-            for zone_id, zdef in ZONE_DEFINITIONS.items():
+            for zone_id, zdef in active_zones.items():
                 zone_rows = grp[
                     grp["residue_id"].apply(
                         lambda rid: str(rid).split(".")[0] in zdef["residues"]
@@ -955,7 +936,7 @@ def run_footprint_analysis(
             ranking_rows.append({
                 "Name": name_val,
                 **{f"{zid}_energy": round(zone_data.get(zid, 0), 4)
-                   for zid in ZONE_DEFINITIONS},
+                   for zid in active_zones},
                 "total_zone_energy": round(sum(zone_data.values()), 4),
                 "n_zones_covered": sum(1 for zid in zone_data if zone_data[zid] < -0.5),
             })
@@ -963,7 +944,7 @@ def run_footprint_analysis(
         # --- Add reference row from imported context (if available) ---
         if df_ref_context is not None:
             ref_zone_data = {}
-            for zone_id, zdef in ZONE_DEFINITIONS.items():
+            for zone_id, zdef in active_zones.items():
                 zone_ref_rows = df_ref_context[
                     df_ref_context["residue_id"].apply(
                         lambda rid: str(rid).split(".")[0] in zdef["residues"]
@@ -996,7 +977,7 @@ def run_footprint_analysis(
             ranking_rows.append({
                 "Name": reference_context_label,
                 **{f"{zid}_energy": round(ref_zone_data.get(zid, 0), 4)
-                   for zid in ZONE_DEFINITIONS},
+                   for zid in active_zones},
                 "total_zone_energy": round(sum(ref_zone_data.values()), 4),
                 "n_zones_covered": sum(1 for zid in ref_zone_data if ref_zone_data[zid] < -0.5),
                 "is_reference": True,
@@ -1038,6 +1019,7 @@ def run_footprint_analysis(
             contact_csv_path=contact_csv,
             campaign_id=campaign_id,
             n_molecules=n_parsed,
+            zones=active_zones,
         )
         zones_html_path = output_dir / "binding_site_zones.html"
         zones_html_path.write_text(html, encoding="utf-8")
@@ -1057,7 +1039,7 @@ def run_footprint_analysis(
         "vs_reference_csv": str(ref_csv) if ref_csv else None,
         "molecule_summary_csv": str(summary_csv),
         "zones_html": str(zones_html_path) if zones_html_path else None,
-        "hit_vs_udx_csv": str(hit_vs_udx_csv) if hit_vs_udx_csv else None,
+        "hit_vs_ref_csv": str(hit_vs_ref_csv) if hit_vs_ref_csv else None,
         "subpocket_coverage_csv": str(subpocket_csv) if subpocket_csv else None,
         "ranking_by_zone_csv": str(ranking_csv) if ranking_csv else None,
         "output_dir": str(output_dir),

@@ -5,9 +5,13 @@
 #
 # Extracts ALL fields from DOCK6 scored mol2 headers:
 #   Grid_Score, Grid_vdw_energy, Grid_es_energy, Internal_energy_repulsive,
-#   FPS_vdw, FPS_es (if 01d footprint was run),
 #   DOCK_Rotatable_Bonds, Formal_Charge, Heavy_Atoms, Molecular_Weight,
 #   HBond_Acceptors, HBond_Donors
+#
+# When keep_all_poses=true, consolidates scores from rescore modules:
+#   - 01d footprint: FPS_vdw_energy, FPS_es_energy, FPS_Score (per pose)
+#   - 01f GB/SA:     GBSA_Score (per pose)
+#   All merged by pose index into dock6_all_poses.csv for 07a pose selection.
 #
 # Merges SMILES from 00a unique_molecules.csv for downstream enrichment.
 #

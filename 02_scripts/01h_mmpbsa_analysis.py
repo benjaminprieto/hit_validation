@@ -119,6 +119,16 @@ def main():
     # Reference context from campaign config
     reference_context = cc.get("reference_context")
 
+    # Zones from campaign config
+    zones = {}
+    raw_zones = cc.get("zones", {})
+    for zone_id, zdef in raw_zones.items():
+        zones[zone_id] = {
+            "residues": set(zdef.get("residues", [])),
+            "label": zdef.get("label", zone_id),
+            "description": zdef.get("description", ""),
+        }
+
     # =========================================================================
     # SETUP
     # =========================================================================
@@ -146,6 +156,7 @@ def main():
         compare_footprint=compare_fp,
         footprint_dir=footprint_dir,
         campaign_id=campaign_id,
+        zones=zones if zones else None,
     )
 
     if not result.get("success"):

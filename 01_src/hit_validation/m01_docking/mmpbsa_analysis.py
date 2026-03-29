@@ -35,33 +35,12 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# ZONE DEFINITIONS
+# ZONE DEFINITIONS — loaded from campaign_config at runtime
 # =============================================================================
-# Sub-pocket classification from UDX PLIP analysis (06a).
-# Shared with 04b footprint_analysis.py.
+# Zones are passed via function parameters from campaign_config.
+# No hardcoded zone definitions. Empty default for backward compatibility.
 
-ZONE_DEFINITIONS = {
-    "phosphate": {
-        "residues": {"ARG598", "LYS599"},
-        "label": "Phosphate (salt bridges)",
-        "description": "Strong in-vacuo ES, expect large GB desolvation penalty.",
-    },
-    "xylose": {
-        "residues": {"TRP392", "TRP495", "TYR565", "SER575"},
-        "label": "Xylose pocket",
-        "description": "Hydrophobic/HBA interactions, expect minimal solvation change.",
-    },
-    "uracil": {
-        "residues": {"ASP361", "THR390", "ARG363"},
-        "label": "Uracil pocket",
-        "description": "Mixed polar/charged, moderate solvation screening.",
-    },
-    "ribose_bridge": {
-        "residues": {"ASP494", "GLU529", "HIS335"},
-        "label": "Ribose bridge",
-        "description": "ASP494 shows +2.74 ES repulsion in-vacuo. Water bridge in PLIP.",
-    },
-}
+ZONE_DEFINITIONS = {}  # populated from campaign_config at runtime
 
 
 # =============================================================================
@@ -374,6 +353,7 @@ def compare_with_footprint(
         decomp_df: pd.DataFrame,
         footprint_csv: Union[str, Path],
         output_dir: Union[str, Path],
+        zones: Optional[Dict[str, Dict]] = None,
 ) -> Dict[str, Any]:
     """
     Compare MMPBSA per-residue decomp with 01d/04b footprint in-vacuo.
@@ -429,7 +409,7 @@ def compare_with_footprint(
     df_merged.to_csv(comp_csv, index=False, encoding="utf-8")
     logger.info(f"  Saved: {comp_csv} ({len(df_merged)} residues)")
 
-    zone_summary = _compute_zone_summary(df_merged)
+    zone_summary = _compute_zone_summary(df_merged, zones=zones)
 
     return {
         "success": True,
@@ -439,11 +419,12 @@ def compare_with_footprint(
     }
 
 
-def _compute_zone_summary(df: pd.DataFrame) -> Dict[str, Dict]:
+def _compute_zone_summary(df: pd.DataFrame, zones: Optional[Dict[str, Dict]] = None) -> Dict[str, Dict]:
     """Compute energy summary by binding site zone."""
+    active_zones = zones or ZONE_DEFINITIONS
     summary = {}
 
-    for zone_name, zdef in ZONE_DEFINITIONS.items():
+    for zone_name, zdef in active_zones.items():
         mask = df["residue_id"].apply(
             lambda rid: str(rid).split(".")[0] in zdef["residues"]
             if pd.notna(rid) else False
@@ -496,10 +477,13 @@ def generate_mmpbsa_html(
     dg = global_results.get("delta_total", None)
     dg_str = f"{dg:+.2f}" if dg is not None else "N/A"
 
-    zone_colors = {
-        "phosphate": "#1D9E75", "xylose": "#378ADD",
-        "uracil": "#BA7517", "ribose_bridge": "#7F77DD",
-    }
+    # Default zone colors (fallback palette)
+    _palette = ["#378ADD", "#1D9E75", "#BA7517", "#7F77DD", "#888780",
+                "#E74C3C", "#2ECC71", "#9B59B6", "#F39C12", "#1ABC9C"]
+    zone_colors = {}
+    if zone_summary:
+        for i, zone_id in enumerate(zone_summary):
+            zone_colors[zone_id] = _palette[i % len(_palette)]
 
     df_sig = decomp_df[decomp_df["total"].abs() > 0.5].copy() if "total" in decomp_df.columns else decomp_df.head(0)
     df_fav = df_sig[df_sig["total"] < 0].sort_values("total")
@@ -640,6 +624,7 @@ def run_mmpbsa_analysis(
         footprint_csv: Optional[str] = None,
         campaign_id: str = "",
         molecule_name: str = "",
+        zones: Optional[Dict[str, Dict]] = None,
 ) -> Dict[str, Any]:
     """
     Run complete MMPBSA analysis pipeline (steps 6-9) for a single molecule.
@@ -698,6 +683,7 @@ def run_mmpbsa_analysis(
             decomp_df=result_parse["df"],
             footprint_csv=footprint_csv,
             output_dir=output_dir,
+            zones=zones,
         )
         if comparison_result["success"]:
             zs = comparison_result.get("zone_summary", {})
@@ -776,6 +762,7 @@ def run_mmpbsa_batch_analysis(
         compare_footprint: bool = True,
         footprint_dir: Optional[str] = None,
         campaign_id: str = "",
+        zones: Optional[Dict[str, Dict]] = None,
 ) -> Dict[str, Any]:
     """
     Parse and analyze MMPBSA results for all molecules.
@@ -786,10 +773,11 @@ def run_mmpbsa_batch_analysis(
         mmpbsa_results_dir: Path to 05_results/{campaign}/01g_mmpbsa_decomp/
         receptor_pdb:       Receptor PDB for residue mapping
         output_dir:         Output directory
-        reference_context:  Optional UDX reference data from campaign_config
+        reference_context:  Optional reference data from campaign_config
         compare_footprint:  Compare with 01d footprint
         footprint_dir:      Path to 04b footprint analysis output
         campaign_id:        Campaign identifier
+        zones:              Binding site zone definitions from campaign_config
 
     Returns:
         Dict with success, per-molecule results, consolidated outputs
@@ -876,6 +864,7 @@ def run_mmpbsa_batch_analysis(
             footprint_csv=fp_csv,
             campaign_id=campaign_id,
             molecule_name=mol_name,
+            zones=zones,
         )
         all_results[mol_name] = result
 

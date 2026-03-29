@@ -1,5 +1,10 @@
 # =============================================================================
-# Hit Validation Campaign — UDX Control Test
+# Hit Validation Campaign Configuration
+# =============================================================================
+# This template defines everything about a validation experiment.
+# Copy this directory for each new campaign, fill in your system-specific values.
+#
+# Project: hit_validation
 # =============================================================================
 campaign_id: "hit_validation"
 
@@ -19,19 +24,57 @@ docking_ph: 6.3
 
 ligands_dir: "ligands/"
 
-reference_mol2: "reference/UDX.mol2"
-
 grids:
-  precomputed_grids_dir: null
+  precomputed_grids_dir: null     # Set path to skip 00d + 01b
   generate: true
   binding_site:
-    method: "reference_ligand"
-    reference_mol2: "reference/UDX.mol2"
+    method: "reference_ligand"          # DEFAULT: usa ligando de referencia para generar esferas + box
+    reference_mol2: "reference/UDX.mol2"  # Mol2 del ligando de referencia (coordenadas cristalográficas)
+    # Alternativa: method: "residues" con lista de residuos (no recomendado)
+    # residues: ["TRP392", "TRP495", "TYR565", "SER575", "HIS335",
+    #            "ASP361", "ARG363", "GLU529", "ARG598", "LYS599"]
 
+# =============================================================================
+# BINDING SITE ZONES
+# =============================================================================
+# Define sub-pocket zones for analysis in modules 04b, 01h, and 07a.
+# Each zone groups residues that form a functional pocket.
+# Zone names are arbitrary — use descriptive labels for your system.
+zones:
+  zone_A:
+    label: "Salt bridge pocket"
+    residues: ["ARG598", "LYS599"]
+    druglike: false
+    description: "Charged interactions, may require non-drug-like groups."
+  zone_B:
+    label: "Aromatic pocket"
+    residues: ["TRP392", "TRP495", "TYR565", "SER575"]
+    druglike: true
+    description: "Aromatic/HBA interactions, drug-like compatible."
+  zone_C:
+    label: "Polar pocket"
+    residues: ["ASP361", "ARG363"]
+    druglike: true
+    description: "Polar interactions, selective recognition."
+  zone_D:
+    label: "Base recognition"
+    residues: ["HIS335", "VAL333", "THR390"]
+    druglike: true
+    description: "Aromatic stacking + HBA/HBD."
+  zone_E:
+    label: "Catalytic"
+    residues: ["GLU529"]
+    druglike: true
+    description: "Functionally critical residue."
+
+# =============================================================================
+# REFERENCE CONTEXT (optional)
+# =============================================================================
+# Pre-computed reference data for comparison in output tables.
+# Can be from reference_docking (e.g., crystallographic ligand) or a prior
+# hit_validation iteration. If not needed, set all paths to null.
 reference_context:
-  label: "UDX (crystallographic)"
-  scores_csv: null
-  plip_json: null
-  footprint_csv: null
-
-pharmit_template_molecule: null
+  label: "Reference"
+  scores_csv: null       # Path to reference dock6_scores.csv
+  plip_json: null        # Path to reference interactions.json
+  footprint_csv: null    # Path to reference residue_consensus.csv

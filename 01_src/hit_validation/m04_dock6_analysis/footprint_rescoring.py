@@ -171,7 +171,7 @@ def run_footprint_rescoring(
     Args:
         docking_dir:   Path to 01c_dock6_run output
         output_dir:    Path for footprint re-scoring output
-        reference_mol2: Reference ligand (e.g., UDX best pose from 01d)
+        reference_mol2: Reference ligand mol2 (e.g., best pose from 01d)
         receptor_mol2:  Receptor mol2 (rec_charged.mol2 from 00b)
         dock6_home:    DOCK6 installation path (for param files)
         timeout:       Timeout per molecule in seconds

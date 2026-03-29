@@ -7,8 +7,11 @@
 #   bash run_pipeline.sh <campaign_config.yaml> [start_from]
 #
 # Examples:
-#   bash run_pipeline.sh 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
-#   bash run_pipeline.sh 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml 01c
+#   bash run_pipeline.sh 04_data/campaigns/hit_validation/campaign_config.yaml
+#   bash run_pipeline.sh 04_data/campaigns/hit_validation/campaign_config.yaml 01c
+#
+#   # Background (survives logout):
+#   nohup bash run_pipeline.sh 04_data/campaigns/hit_validation/campaign_config.yaml > pipeline.log 2>&1 &
 #
 # Pipeline:
 #   00a  Ligand preparation    (antechamber: AM1-BCC + Sybyl types, batch)
@@ -21,16 +24,14 @@
 #   01e  Score collection      (parse all scores → CSV/Excel)
 #   03a  PLIP analysis         (docked pose + receptor → interactions)
 #   04b  Footprint analysis    (per-residue consensus + zone coverage)
-#   06a  Pharmit pharmacophore (from best hit — conditional)
-#   06b  Pharmit zone selector (conditional)
-#   07a  Decision report       (per-molecule validation evidence)
+#   07a  Decision report       (pose selection + per-molecule validation evidence)
 # =============================================================================
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
     echo "Usage: bash run_pipeline.sh <campaign_config.yaml> [start_from]"
     echo ""
-    echo "Modules: 00a 00b 00d 01b 01c 01d 01f 01e 03a 04b 06a 06b 07a"
+    echo "Modules: 00a 00b 00d 01b 01c 01d 01f 01e 03a 04b 07a"
     echo ""
     echo "Examples:"
     echo "  bash run_pipeline.sh config.yaml        # full pipeline"
@@ -49,15 +50,6 @@ if [ ! -f "$CAMPAIGN" ]; then
     exit 1
 fi
 
-# Check if pharmit_template_molecule is set in campaign config
-PHARMIT_MOL=$(python3 -c "
-import yaml, sys
-with open('$CAMPAIGN') as f:
-    cc = yaml.safe_load(f)
-mol = cc.get('pharmit_template_molecule')
-print(mol if mol else '')
-" 2>/dev/null || echo "")
-
 # Check if precomputed_grids_dir is set in campaign config
 PRECOMPUTED_GRIDS=$(python3 -c "
 import yaml, sys
@@ -69,7 +61,7 @@ print(d if d else '')
 " 2>/dev/null || echo "")
 
 # Module order
-MODULES=(00a 00b 00d 01b 01c 01d 01f 01e 03a 04b 06a 06b 07a)
+MODULES=(00a 00b 00d 01b 01c 01d 01f 01e 03a 04b 07a)
 
 # Find start index
 START_IDX=0
@@ -129,22 +121,6 @@ for i in "${!MODULES[@]}"; do
         01e) run_module 01e 01e_score_collection.py 01e_score_collection.yaml "Score Collection" ;;
         03a) run_module 03a 03a_plip_interaction_analysis.py 03a_plip_interaction_analysis.yaml "PLIP Analysis" ;;
         04b) run_module 04b 04b_footprint_analysis.py 04b_footprint_analysis.yaml "Footprint Analysis" ;;
-        06a)
-            if [ -n "$PHARMIT_MOL" ]; then
-                run_module 06a 06a_pharmit_pharmacophore.py 06a_pharmit_pharmacophore.yaml "Pharmit Pharmacophore"
-            else
-                echo "[06a] Pharmit Pharmacophore — SKIPPED (pharmit_template_molecule not set)"
-                echo ""
-            fi
-            ;;
-        06b)
-            if [ -n "$PHARMIT_MOL" ]; then
-                run_module 06b 06b_pharmit_zone_selector.py 06b_pharmit_zone_selector.yaml "Pharmit Zone Selector"
-            else
-                echo "[06b] Pharmit Zone Selector — SKIPPED (pharmit_template_molecule not set)"
-                echo ""
-            fi
-            ;;
         07a) run_module 07a 07a_decision_report.py 07a_decision_report.yaml "Decision Report" ;;
     esac
 done

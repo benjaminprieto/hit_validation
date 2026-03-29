@@ -26,7 +26,7 @@ Output: 05_results/{campaign_id}/01c_dock6_run/
 
 Usage:
     python 02_scripts/01c_dock6_run.py --config 03_configs/01c_dock6_run.yaml \
-        --campaigns 04_data/campaigns/SD1_reference_pH63/campaign_config.yaml
+        --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
 
 Project: hit_validation
 Module: 01c (DOCK6 rigid re-docking)

@@ -8,9 +8,9 @@ Fills the gap between:
   01f GB/SA     — global solvation score (no per-residue breakdown)
 
 MMPBSA.py idecomp=1 gives: vdW + ES + GB + SA per residue, answering:
-  - Are ARG598/LYS599 salt bridges real or in-vacuo artifacts?
-  - Does ASP494 rescue with solvation screening?
-  - Do hydrophobic residues (TRP392/TRP495) rise in relative ranking?
+  - Are salt bridge interactions real or in-vacuo artifacts?
+  - Do charged residues rescue with solvation screening?
+  - Do hydrophobic residues rise in relative ranking vs in-vacuo?
 
 Two modes:
   single_point — 1-frame MMPBSA on best pose. Minutes, no error bars.

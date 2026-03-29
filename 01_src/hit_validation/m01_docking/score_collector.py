@@ -224,6 +224,8 @@ def run_score_collection(
         scores_filename: str = "dock6_scores.xlsx",
         mol2_dirname: str = "best_poses",
         source_label: Optional[str] = None,
+        fps_rescore_dir: Optional[Union[str, Path]] = None,
+        gbsa_rescore_dir: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """
     Collect and rank DOCK6 docking scores.
@@ -234,13 +236,9 @@ def run_score_collection(
     Excel + CSV output ready for molecular_metrics enrichment.
 
     When keep_all_poses=True, also produces dock6_all_poses.csv
-    with one row per pose per molecule (for clustering module 03a).
-
-    Output columns:
-        Rank, Name, Smile, Grid_Score, Grid_vdw_energy, Grid_es_energy,
-        Internal_energy_repulsive, DOCK_Rotatable_Bonds, Formal_Charge,
-        Heavy_Atoms, Molecular_Weight, HBond_Acceptors, HBond_Donors,
-        n_poses, [any extra DOCK6 header fields]
+    with one row per pose per molecule. If fps_rescore_dir and/or
+    gbsa_rescore_dir are provided, scores from 01d footprint and
+    01f GB/SA rescore are merged by pose index into all_poses.
 
     Args:
         docking_dir: Path to 01c_dock6_run output
@@ -249,10 +247,12 @@ def run_score_collection(
         score_key: Score field to rank by
         max_molecules: Top N to include (0 = all)
         extract_best_pose_mol2: Extract best pose mol2 per molecule
-        keep_all_poses: Export all poses to dock6_all_poses.csv (for clustering)
+        keep_all_poses: Export all poses to dock6_all_poses.csv
         scores_filename: Name for Excel output file
         mol2_dirname: Directory name for best pose mol2 files
         source_label: Optional label for source column
+        fps_rescore_dir: Path to 01d_footprint_rescore/ (for FPS score merge)
+        gbsa_rescore_dir: Path to 01f_gbsa_rescore/ (for GBSA score merge)
 
     Returns:
         Dict with: success, n_molecules, n_scored, output files
@@ -265,10 +265,16 @@ def run_score_collection(
         return {"success": False,
                 "error": f"Docking dir not found: {docking_dir}"}
 
+    # Resolve rescore dirs
+    fps_dir = Path(fps_rescore_dir) if fps_rescore_dir and Path(fps_rescore_dir).exists() else None
+    gbsa_dir = Path(gbsa_rescore_dir) if gbsa_rescore_dir and Path(gbsa_rescore_dir).exists() else None
+
     logger.info("=" * 60)
-    logger.info("  Score Collection (DOCK6) v2.0")
+    logger.info("  Score Collection (DOCK6) v3.0")
     logger.info("=" * 60)
     logger.info(f"  Docking dir: {docking_dir}")
+    logger.info(f"  FPS dir:     {fps_dir or 'not available'}")
+    logger.info(f"  GBSA dir:    {gbsa_dir or 'not available'}")
     logger.info(f"  Score key:   {score_key}")
     logger.info(f"  Output:      {output_dir}")
 
@@ -320,19 +326,65 @@ def run_score_collection(
 
         all_results.append(result)
 
-        # --- Collect ALL poses for clustering ---
+        # --- Collect ALL poses with consolidated rescore scores ---
         if keep_all_poses:
+            # Parse FPS rescore mol2 (same poses, additional score fields)
+            fps_pose_scores = {}  # pose_index → {FPS_vdw_energy: ..., ...}
+            if fps_dir:
+                fps_mol2 = fps_dir / name / f"{name}_fps_scored.mol2"
+                if fps_mol2.exists():
+                    fps_poses = parse_scored_mol2(str(fps_mol2))
+                    for fp in fps_poses:
+                        fps_pose_scores[fp["pose_index"]] = {
+                            k: v for k, v in fp["scores"].items()
+                            if isinstance(v, (int, float)) and k != "Name"
+                        }
+
+            # Parse GBSA rescore mol2 (same poses, additional score fields)
+            gbsa_pose_scores = {}  # pose_index → {GBSA_Score: ..., ...}
+            if gbsa_dir:
+                gbsa_mol2 = gbsa_dir / name / f"{name}_gbsa_scored.mol2"
+                if gbsa_mol2.exists():
+                    gbsa_poses = parse_scored_mol2(str(gbsa_mol2))
+                    for gp in gbsa_poses:
+                        gbsa_pose_scores[gp["pose_index"]] = {
+                            k: v for k, v in gp["scores"].items()
+                            if isinstance(v, (int, float)) and k != "Name"
+                        }
+
             for pose in poses:
+                pidx = pose["pose_index"]
                 pose_result = {
                     "Name": name,
-                    "pose_index": pose["pose_index"],
+                    "Pose_Index": pidx,
                     "n_atoms": pose["n_atoms"],
-                    "scored_mol2": str(scored_file),
                 }
+                # Grid scores from 01c
                 for key, val in pose["scores"].items():
                     if key == "Name":
                         continue
                     pose_result[key] = val
+
+                # Merge FPS scores from 01d (by pose index)
+                fps_s = fps_pose_scores.get(pidx, {})
+                for key, val in fps_s.items():
+                    # Prefix with FPS_ if not already present to avoid collision
+                    out_key = key if key.startswith("FPS_") or key.startswith("Footprint") else f"FPS_{key}"
+                    # Use original key names from DOCK6 FPS header
+                    if key not in pose_result:
+                        pose_result[key] = val
+                    elif out_key not in pose_result:
+                        pose_result[out_key] = val
+
+                # Merge GBSA scores from 01f (by pose index)
+                gbsa_s = gbsa_pose_scores.get(pidx, {})
+                for key, val in gbsa_s.items():
+                    out_key = key if key.startswith("GBSA_") or key.startswith("GB_SA") else f"GBSA_{key}"
+                    if key not in pose_result:
+                        pose_result[key] = val
+                    elif out_key not in pose_result:
+                        pose_result[out_key] = val
+
                 all_poses_results.append(pose_result)
 
         score_val = scores.get(score_key, "N/A")

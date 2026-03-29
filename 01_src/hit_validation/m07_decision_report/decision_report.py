@@ -4,75 +4,60 @@ Decision Report - Core Module (07a)
 Generates consolidated validation evidence reports for screening hits.
 
 For each candidate molecule, produces:
+  - Multi-criteria pose selection (composite scoring)
   - Scoring comparison (with optional reference context)
-  - Sub-pocket coverage analysis (absolute energy thresholds)
+  - Sub-pocket zone coverage analysis (absolute energy thresholds)
   - PLIP interaction summary
   - Auto-generated recommendation (template/purchase/weak)
+  - Selected pose mol2 export for downstream pipelines
 
 Input:
-  - 01e_score_collection/dock6_scores.csv
+  - 01e_score_collection/dock6_scores.csv (and dock6_all_poses.csv)
+  - 01c_dock6_run/{name}/{name}_scored.mol2 (multi-pose mol2 files)
   - 03a_plip_analysis/{name}/interactions.json
-  - 04b_footprint_analysis/hit_vs_udx_comparison.csv
   - 04b_footprint_analysis/subpocket_coverage.csv
-  - Reference data from reference_docking
+  - Optional reference context data (configurable)
 
 Output:
-  - decision_report.html  (one-page-per-molecule report)
-  - decision_summary.csv  (machine-readable ranking)
+  - decision_report.html         (one-page-per-molecule report)
+  - decision_summary.csv         (machine-readable ranking)
+  - pose_selection_summary.csv   (per-molecule pose selection details)
+  - selected_poses/{name}.mol2   (best pose per molecule)
 
 Location: 01_src/hit_validation/m07_decision_report/decision_report.py
 Project: hit_validation
 Module: 07a (core)
-Version: 1.0 (2026-03-27)
+Version: 2.0 (2026-03-29)
 """
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# ZONE DEFINITIONS (from 04b — same for XT1/UDX system)
+# ZONE DEFINITIONS — loaded from campaign_config at runtime
 # =============================================================================
+# No hardcoded zones. Zones are passed via the `zones` parameter.
+# If no zones are provided, zone-based analysis is skipped.
 
-ZONE_DEFINITIONS = {
-    "phosphate": {
-        "residues": {"ARG598", "LYS599"},
-        "label": "Phosphate (salt bridges)",
-    },
-    "xylose": {
-        "residues": {"TRP392", "TRP495", "TYR565", "SER575"},
-        "label": "Xylose pocket",
-    },
-    "uracil": {
-        "residues": {"ASP361", "ARG363"},
-        "label": "Uracil pocket",
-    },
-    "ribose": {
-        "residues": {"HIS335", "VAL333", "THR390"},
-        "label": "Ribose / base recognition",
-    },
-    "catalytic": {
-        "residues": {"GLU529"},
-        "label": "Catalytic (GLU529)",
-    },
-}
-
-KEY_RESIDUES = ["TRP392", "HIS335", "GLU529", "ASP494", "ARG598"]
+ZONE_DEFINITIONS = {}  # empty default — populated from campaign_config
 
 
 # =============================================================================
-# REFERENCE DATA LOADING
+# REFERENCE DATA LOADING (generic — works with any reference ligand)
 # =============================================================================
 
 def load_reference_scores(ref_scores_path: Optional[str]) -> Dict[str, float]:
-    """Load UDX reference scores from reference_docking output."""
+    """Load reference scores from a prior pipeline run (e.g., reference_docking)."""
     if not ref_scores_path or not Path(ref_scores_path).exists():
         return {}
     try:
@@ -91,7 +76,7 @@ def load_reference_scores(ref_scores_path: Optional[str]) -> Dict[str, float]:
 
 
 def load_reference_plip(ref_plip_path: Optional[str]) -> Dict[str, Any]:
-    """Load UDX reference PLIP interactions."""
+    """Load reference PLIP interactions from a prior pipeline run."""
     if not ref_plip_path or not Path(ref_plip_path).exists():
         return {}
     try:
@@ -103,7 +88,7 @@ def load_reference_plip(ref_plip_path: Optional[str]) -> Dict[str, Any]:
 
 
 def load_reference_footprint(ref_footprint_path: Optional[str]) -> pd.DataFrame:
-    """Load UDX reference footprint consensus."""
+    """Load reference footprint consensus from a prior pipeline run."""
     if not ref_footprint_path or not Path(ref_footprint_path).exists():
         return pd.DataFrame()
     try:
@@ -111,6 +96,123 @@ def load_reference_footprint(ref_footprint_path: Optional[str]) -> pd.DataFrame:
     except Exception as e:
         logger.warning(f"  Could not load reference footprint: {e}")
         return pd.DataFrame()
+
+
+# =============================================================================
+# POSE SELECTION — multi-criteria composite scoring
+# =============================================================================
+
+def _normalize_min_max(values: pd.Series) -> pd.Series:
+    """Normalize to [0, 1] where more negative = better = 1.0."""
+    vmin, vmax = values.min(), values.max()
+    if vmin == vmax:
+        return pd.Series(1.0, index=values.index)
+    return (vmax - values) / (vmax - vmin)
+
+
+def select_best_pose(
+        mol_poses: pd.DataFrame,
+        weights: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    """
+    Select best pose from multi-pose data using composite scoring.
+
+    Args:
+        mol_poses: DataFrame with one row per pose, columns include score fields
+        weights: Dict mapping score column → weight (default: equal weight grid+gbsa)
+
+    Returns:
+        Dict with best_pose_idx, composite_score, per-criterion scores, top5 poses
+    """
+    if weights is None:
+        weights = {"Grid_Score": 0.35, "GBSA_Score": 0.35,
+                   "FPS_es_energy": 0.15, "FPS_vdw_energy": 0.15}
+
+    if len(mol_poses) == 0:
+        return {"best_pose_idx": 0, "composite_score": 0, "top5": []}
+
+    if len(mol_poses) == 1:
+        row = mol_poses.iloc[0]
+        return {
+            "best_pose_idx": int(row.get("Pose_Index", 0)),
+            "composite_score": 1.0,
+            "top5": [{"pose_idx": int(row.get("Pose_Index", 0)),
+                      "composite": 1.0}],
+        }
+
+    # Filter to available columns and re-normalize weights
+    available = {k: v for k, v in weights.items() if k in mol_poses.columns}
+    if not available:
+        # Fallback: use Grid_Score if available
+        if "Grid_Score" in mol_poses.columns:
+            available = {"Grid_Score": 1.0}
+        else:
+            best_idx = 0
+            return {"best_pose_idx": int(mol_poses.iloc[best_idx].get("Pose_Index", 0)),
+                    "composite_score": 0, "top5": []}
+
+    total_w = sum(available.values())
+    norm_weights = {k: v / total_w for k, v in available.items()}
+
+    # Normalize each criterion and compute composite
+    composite = pd.Series(0.0, index=mol_poses.index)
+    criterion_scores = {}
+    for col, w in norm_weights.items():
+        normed = _normalize_min_max(mol_poses[col].astype(float))
+        criterion_scores[col] = normed
+        composite += w * normed
+
+    best_local_idx = composite.idxmax()
+    best_row = mol_poses.loc[best_local_idx]
+
+    # Top 5 poses
+    top5_indices = composite.nlargest(min(5, len(composite))).index
+    top5 = []
+    for idx in top5_indices:
+        pose_info = {
+            "pose_idx": int(mol_poses.loc[idx].get("Pose_Index", idx)),
+            "composite": round(float(composite.loc[idx]), 4),
+        }
+        for col in available:
+            pose_info[col] = round(float(mol_poses.loc[idx][col]), 2)
+        top5.append(pose_info)
+
+    return {
+        "best_pose_idx": int(best_row.get("Pose_Index", 0)),
+        "composite_score": round(float(composite.loc[best_local_idx]), 4),
+        "top5": top5,
+    }
+
+
+# =============================================================================
+# MOL2 EXTRACTION — extract single pose from multi-pose mol2
+# =============================================================================
+
+def extract_pose_mol2(scored_mol2_path: str, pose_index: int) -> Optional[str]:
+    """
+    Extract a single pose from a DOCK6 multi-pose scored mol2 file.
+
+    Returns the mol2 text for the specified pose (0-indexed), or None if not found.
+    """
+    path = Path(scored_mol2_path)
+    if not path.exists():
+        return None
+
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception:
+        return None
+
+    # Split by @<TRIPOS>MOLECULE markers
+    molecules = re.split(r'(?=@<TRIPOS>MOLECULE)', content)
+    molecules = [m for m in molecules if m.strip()]
+
+    if pose_index < len(molecules):
+        return molecules[pose_index]
+    elif molecules:
+        return molecules[0]  # fallback to first pose
+    return None
 
 
 # =============================================================================
@@ -124,11 +226,13 @@ def classify_molecule(
         zone_energy_cutoff: float = -0.5,
         min_zones_for_template: int = 2,
         grid_score_purchase_threshold: float = -30.0,
+        zones: Optional[Dict[str, Dict]] = None,
 ) -> Dict[str, Any]:
     """
     Auto-classify a molecule based on scoring and zone coverage.
 
     Uses absolute energy thresholds (not relative to a reference).
+    Zone definitions come from campaign_config (no hardcoded zones).
 
     Returns:
         Dict with recommendation, reasoning, covered_zones
@@ -141,21 +245,23 @@ def classify_molecule(
         if not covered:
             continue
         hit_energy = zone_energies.get(zone_id, 0)
-        # Zone is meaningfully covered if energy < -0.5 kcal/mol (absolute)
         if hit_energy < zone_energy_cutoff:
             zones_covered.append(zone_id)
 
     n_zones = len(zones_covered)
 
+    # Get zone labels for readable output
+    active_zones = zones or ZONE_DEFINITIONS
+    zone_labels = [active_zones.get(z, {}).get("label", z) for z in zones_covered]
+
     if n_zones >= min_zones_for_template:
         recommendation = "Strong Pharmit template candidate"
-        reasoning = (f"Covers {n_zones} drug-like zones with meaningful energy: "
-                     f"{', '.join(zones_covered)}")
-    elif grid_score <= grid_score_purchase_threshold and (
-            zone_coverage.get("xylose", False) or zone_coverage.get("uracil", False)):
+        reasoning = (f"Covers {n_zones} zones with meaningful energy: "
+                     f"{', '.join(zone_labels)}")
+    elif grid_score <= grid_score_purchase_threshold and n_zones >= 1:
         recommendation = "Purchase candidate"
         reasoning = (f"Grid Score {grid_score:.1f} <= {grid_score_purchase_threshold} "
-                     f"and covers xylose or uracil zone")
+                     f"and covers {n_zones} zone(s)")
     else:
         recommendation = "Weak candidate"
         reasoning = f"Grid Score {grid_score:.1f}, zones covered: {n_zones}"
@@ -178,9 +284,11 @@ def generate_decision_html(
         campaign_id: str = "",
         ref_scores: Optional[Dict[str, float]] = None,
         reference_label: str = "Reference",
+        zones: Optional[Dict[str, Dict]] = None,
 ) -> str:
     """Generate a one-page-per-molecule HTML decision report."""
     ref_scores = ref_scores or {}
+    active_zones = zones or ZONE_DEFINITIONS
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -205,6 +313,7 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
 .zone-yes{{color:#27ae60;font-weight:bold}}
 .zone-no{{color:#e74c3c}}
 .meta{{font-size:12px;color:#777}}
+.highlight{{background:#e8f5e9}}
 .footer{{margin-top:40px;padding-top:10px;border-top:1px solid #ddd;font-size:11px;color:#999}}
 </style></head><body>
 
@@ -215,13 +324,15 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
     # Summary table
     html += """<h2>Summary Ranking</h2>
 <table>
-<tr><th>Rank</th><th>Name</th><th>Grid Score</th><th>Zones</th><th>Recommendation</th></tr>
+<tr><th>Rank</th><th>Name</th><th>Grid Score</th><th>Composite</th><th>Pose</th><th>Zones</th><th>Recommendation</th></tr>
 """
     if ref_scores:
         html += f"""<tr style="background:#f0f0f0;font-style:italic">
 <td>&mdash;</td>
 <td>{reference_label} (ref.)</td>
 <td class="mono">{ref_scores.get('Grid_Score', 0):.1f}</td>
+<td>&mdash;</td>
+<td>&mdash;</td>
 <td>&mdash;</td>
 <td><span class="meta">reference</span></td>
 </tr>
@@ -233,6 +344,8 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
 <td>{i}</td>
 <td><b>{mol['name']}</b></td>
 <td class="mono">{mol.get('grid_score', 0):.1f}</td>
+<td class="mono">{mol.get('composite_score', 0):.3f}</td>
+<td>{mol.get('selected_pose_idx', 0)}</td>
 <td>{mol.get('n_zones_covered', 0)}</td>
 <td><span class="rec {rec_class}">{rec}</span></td>
 </tr>
@@ -251,61 +364,80 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
 <h3>{name}</h3>
 <div class="rec {rec_class}">{rec}</div>
 <p class="meta">{mol.get('reasoning', '')}</p>
-
-<h4>Scoring Comparison</h4>
-<table>
-<tr><th>Score</th><th>Hit Value</th><th>Reference</th><th>Delta</th></tr>
 """
+
+        # Pose Selection Card
+        top5 = mol.get("top5_poses", [])
+        if top5:
+            html += """<h4>Pose Selection (top 5)</h4>
+<table><tr><th>Pose</th><th>Composite</th>"""
+            # Add column headers for available scores
+            score_cols = [k for k in top5[0].keys() if k not in ("pose_idx", "composite")]
+            for col in score_cols:
+                html += f"<th>{col}</th>"
+            html += "</tr>"
+            for pose in top5:
+                is_selected = pose["pose_idx"] == mol.get("selected_pose_idx", -1)
+                row_class = ' class="highlight"' if is_selected else ""
+                html += f"<tr{row_class}><td>{'<b>' if is_selected else ''}{pose['pose_idx']}{'</b>' if is_selected else ''}</td>"
+                html += f"<td class='mono'>{pose['composite']:.3f}</td>"
+                for col in score_cols:
+                    html += f"<td class='mono'>{pose.get(col, 0):.2f}</td>"
+                html += "</tr>"
+            html += "</table>"
+
+        # Scoring Summary
+        html += """<h4>Scoring Summary</h4>
+<table>
+<tr><th>Score</th><th>Hit Value</th>"""
+        if ref_scores:
+            html += f"<th>{reference_label}</th><th>Delta</th>"
+        html += "</tr>"
+
         for score_key in ["Grid_Score", "Grid_vdw_energy", "Grid_es_energy"]:
             hit_val = mol.get("scores", {}).get(score_key, 0)
+            html += f"""<tr>
+<td>{score_key}</td>
+<td class="mono">{hit_val:.2f}</td>"""
             if ref_scores:
                 ref_val = ref_scores.get(score_key, 0)
                 delta = hit_val - ref_val
-                ref_str = f'{ref_val:.2f}'
-                delta_str = f'{delta:+.2f}'
-            else:
-                ref_str = '&mdash;'
-                delta_str = '&mdash;'
-            html += f"""<tr>
-<td>{score_key}</td>
-<td class="mono">{hit_val:.2f}</td>
-<td class="mono">{ref_str}</td>
-<td class="mono">{delta_str}</td>
-</tr>
-"""
-        # MMPBSA ΔG row (if available)
+                html += f"""<td class="mono">{ref_val:.2f}</td>
+<td class="mono">{delta:+.2f}</td>"""
+            html += "</tr>"
+
+        # MMPBSA row
         mmpbsa_dg = mol.get("mmpbsa_dg")
         if mmpbsa_dg is not None:
             html += f"""<tr style="border-top:2px solid #dee2e6">
-<td><b>MMPBSA ΔG</b></td>
-<td class="mono"><b>{mmpbsa_dg:.2f}</b></td>
-<td class="mono">&mdash;</td>
-<td class="mono">&mdash;</td>
-</tr>
-"""
+<td><b>MMPBSA dG</b></td>
+<td class="mono"><b>{mmpbsa_dg:.2f}</b></td>"""
+            if ref_scores:
+                html += '<td class="mono">&mdash;</td><td class="mono">&mdash;</td>'
+            html += "</tr>"
         html += "</table>"
 
         # Zone coverage
-        html += """<h4>Sub-pocket Coverage</h4>
-<table><tr><th>Zone</th><th>Covered</th><th>Hit Energy</th><th>Ref Energy</th></tr>
-"""
-        for zone_id, zdef in ZONE_DEFINITIONS.items():
-            covered = mol.get("zone_coverage", {}).get(zone_id, False)
-            hit_e = mol.get("zone_energies", {}).get(zone_id, 0)
-            ref_zone_e = mol.get("ref_zone_energies", {})
-            if ref_zone_e:
-                ref_e_str = f'{ref_zone_e.get(zone_id, 0):.2f}'
-            else:
-                ref_e_str = '&mdash;'
-            cov_str = '<span class="zone-yes">YES</span>' if covered else '<span class="zone-no">no</span>'
-            html += f"""<tr>
-<td>{zdef['label']}</td>
+        if active_zones:
+            html += """<h4>Sub-pocket Coverage</h4>
+<table><tr><th>Zone</th><th>Covered</th><th>Hit Energy</th>"""
+            if mol.get("ref_zone_energies"):
+                html += f"<th>{reference_label}</th>"
+            html += "</tr>"
+
+            for zone_id, zdef in active_zones.items():
+                covered = mol.get("zone_coverage", {}).get(zone_id, False)
+                hit_e = mol.get("zone_energies", {}).get(zone_id, 0)
+                cov_str = '<span class="zone-yes">YES</span>' if covered else '<span class="zone-no">no</span>'
+                html += f"""<tr>
+<td>{zdef.get('label', zone_id)}</td>
 <td>{cov_str}</td>
-<td class="mono">{hit_e:.2f}</td>
-<td class="mono">{ref_e_str}</td>
-</tr>
-"""
-        html += "</table>"
+<td class="mono">{hit_e:.2f}</td>"""
+                if mol.get("ref_zone_energies"):
+                    ref_e = mol["ref_zone_energies"].get(zone_id, 0)
+                    html += f'<td class="mono">{ref_e:.2f}</td>'
+                html += "</tr>"
+            html += "</table>"
 
         # PLIP interactions
         plip_ints = mol.get("plip_interactions", [])
@@ -326,7 +458,7 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
 
     html += f"""
 <div class="footer">
-hit_validation | Module 07a | Decision Report v1.0 | {datetime.now().strftime('%Y-%m-%d %H:%M')}
+hit_validation | Module 07a | Decision Report v2.0 | {datetime.now().strftime('%Y-%m-%d %H:%M')}
 </div>
 </body></html>"""
 
@@ -353,23 +485,31 @@ def run_decision_report(
         mmpbsa_analysis_dir: Optional[str] = None,
         mmpbsa_dg_strong_threshold: float = -20.0,
         mmpbsa_dg_moderate_threshold: float = -10.0,
+        zones: Optional[Dict[str, Dict]] = None,
+        docking_dir: Optional[str] = None,
+        all_poses_csv: Optional[str] = None,
+        pose_selection_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """
-    Generate decision report for all validated hits.
+    Generate decision report with multi-criteria pose selection.
 
     Args:
         scores_csv: Path to 01e dock6_scores.csv
         output_dir: Output directory
-        plip_dir: Path to 03a_plip_analysis/ (per-molecule PLIP results)
+        plip_dir: Path to 03a_plip_analysis/
         footprint_dir: Path to 04b_footprint_analysis/
-        reference_scores_path: Path to reference_docking scores CSV
-        reference_plip_path: Path to reference_docking PLIP JSON
-        reference_footprint_path: Path to reference_docking footprint CSV
+        reference_scores_path: Path to reference scores CSV (optional)
+        reference_plip_path: Path to reference PLIP JSON (optional)
+        reference_footprint_path: Path to reference footprint CSV (optional)
         zone_energy_cutoff: Absolute energy cutoff for zone coverage (kcal/mol)
         min_zones_for_template: Min zones for "strong template" recommendation
         grid_score_purchase_threshold: Grid Score threshold for purchase
         campaign_id: Campaign identifier
-        reference_label: Display label for reference data in report
+        reference_label: Display label for reference data
+        zones: Binding site zone definitions from campaign_config
+        docking_dir: Path to 01c_dock6_run/ (for mol2 extraction)
+        all_poses_csv: Path to dock6_all_poses.csv (for multi-pose selection)
+        pose_selection_weights: Weights for composite pose scoring
 
     Returns:
         Dict with success, output paths
@@ -377,8 +517,10 @@ def run_decision_report(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    active_zones = zones or ZONE_DEFINITIONS
+
     logger.info("=" * 60)
-    logger.info("  07a Decision Report")
+    logger.info("  07a Decision Report v2.0")
     logger.info("=" * 60)
 
     # --- Load hit scores ---
@@ -388,6 +530,12 @@ def run_decision_report(
     df_scores = pd.read_csv(scores_csv)
     logger.info(f"  Loaded {len(df_scores)} molecules from scores CSV")
 
+    # --- Load all poses for multi-criteria selection ---
+    df_all_poses = None
+    if all_poses_csv and Path(all_poses_csv).exists():
+        df_all_poses = pd.read_csv(all_poses_csv)
+        logger.info(f"  Loaded {len(df_all_poses)} poses from all_poses CSV")
+
     # --- Load reference data ---
     ref_scores = load_reference_scores(reference_scores_path)
     ref_plip = load_reference_plip(reference_plip_path)
@@ -395,8 +543,8 @@ def run_decision_report(
 
     # Build reference zone energies from footprint
     ref_zone_energies = {}
-    if not ref_footprint.empty and "residue_id" in ref_footprint.columns:
-        for zone_id, zdef in ZONE_DEFINITIONS.items():
+    if not ref_footprint.empty and "residue_id" in ref_footprint.columns and active_zones:
+        for zone_id, zdef in active_zones.items():
             zone_rows = ref_footprint[
                 ref_footprint["residue_id"].apply(
                     lambda rid: str(rid).split(".")[0] in zdef["residues"]
@@ -408,9 +556,8 @@ def run_decision_report(
                 ref_zone_energies[zone_id] = 0.0
 
     # --- Load MMPBSA data (from 01h) ---
-    mmpbsa_data = {}  # mol_name → {dG_total, zone_summary, ...}
+    mmpbsa_data = {}
     if mmpbsa_analysis_dir and Path(mmpbsa_analysis_dir).exists():
-        # Load consolidated energies
         consolidated_csv = Path(mmpbsa_analysis_dir) / "consolidated_mmpbsa.csv"
         if consolidated_csv.exists():
             try:
@@ -427,7 +574,6 @@ def run_decision_report(
             except Exception as e:
                 logger.warning(f"  Could not load MMPBSA data: {e}")
 
-        # Load per-molecule zone summaries
         for mol_dir in Path(mmpbsa_analysis_dir).iterdir():
             if not mol_dir.is_dir():
                 continue
@@ -435,11 +581,11 @@ def run_decision_report(
             if zone_json.exists():
                 try:
                     with open(zone_json) as f:
-                        zones = json.load(f)
+                        zone_s = json.load(f)
                     if mol_dir.name in mmpbsa_data:
-                        mmpbsa_data[mol_dir.name]["zone_summary"] = zones
+                        mmpbsa_data[mol_dir.name]["zone_summary"] = zone_s
                     else:
-                        mmpbsa_data[mol_dir.name] = {"zone_summary": zones}
+                        mmpbsa_data[mol_dir.name] = {"zone_summary": zone_s}
                 except Exception:
                     pass
 
@@ -450,6 +596,11 @@ def run_decision_report(
         if fp_csv.exists():
             hit_footprint = pd.read_csv(fp_csv)
 
+    # --- Pose selection + mol2 export setup ---
+    selected_poses_dir = output_dir / "selected_poses"
+    selected_poses_dir.mkdir(parents=True, exist_ok=True)
+    pose_selection_rows = []
+
     # --- Build per-molecule report data ---
     molecules = []
 
@@ -458,12 +609,43 @@ def run_decision_report(
         scores = {col: float(row[col]) for col in row.index
                   if isinstance(row[col], (int, float)) and col not in ("Rank", "n_poses")}
 
+        # --- Multi-criteria pose selection ---
+        pose_result = {"best_pose_idx": 0, "composite_score": 0, "top5": []}
+        if df_all_poses is not None:
+            mol_poses = df_all_poses[df_all_poses["Name"] == name].copy()
+            if not mol_poses.empty:
+                # Add Pose_Index if not present
+                if "Pose_Index" not in mol_poses.columns:
+                    mol_poses = mol_poses.reset_index(drop=True)
+                    mol_poses["Pose_Index"] = range(len(mol_poses))
+                pose_result = select_best_pose(mol_poses, pose_selection_weights)
+
+                # Update scores to use selected pose's scores
+                best_pose_rows = mol_poses[
+                    mol_poses["Pose_Index"] == pose_result["best_pose_idx"]
+                ]
+                if not best_pose_rows.empty:
+                    bp = best_pose_rows.iloc[0]
+                    for col in bp.index:
+                        if isinstance(bp[col], (int, float)) and col not in ("Rank", "n_poses", "Pose_Index"):
+                            scores[col] = float(bp[col])
+
+        selected_pose_idx = pose_result["best_pose_idx"]
+
+        # --- Export selected pose mol2 ---
+        if docking_dir:
+            scored_mol2 = Path(docking_dir) / name / f"{name}_scored.mol2"
+            pose_text = extract_pose_mol2(str(scored_mol2), selected_pose_idx)
+            if pose_text:
+                mol2_out = selected_poses_dir / f"{name}.mol2"
+                mol2_out.write_text(pose_text, encoding="utf-8")
+
         # Zone coverage from footprint
         zone_coverage = {}
         zone_energies = {}
-        if not hit_footprint.empty:
+        if not hit_footprint.empty and active_zones:
             mol_fp = hit_footprint[hit_footprint["Name"] == name]
-            for zone_id, zdef in ZONE_DEFINITIONS.items():
+            for zone_id, zdef in active_zones.items():
                 zone_rows = mol_fp[
                     mol_fp["residue_id"].apply(
                         lambda rid: str(rid).split(".")[0] in zdef["residues"]
@@ -473,7 +655,7 @@ def run_decision_report(
                 zone_energies[zone_id] = zone_total
                 zone_coverage[zone_id] = zone_total < -0.5
         else:
-            for zone_id in ZONE_DEFINITIONS:
+            for zone_id in active_zones:
                 zone_coverage[zone_id] = False
                 zone_energies[zone_id] = 0.0
 
@@ -489,11 +671,11 @@ def run_decision_report(
                 except Exception:
                     pass
 
-        # MMPBSA data for this molecule
+        # MMPBSA data
         mol_mmpbsa = mmpbsa_data.get(name, {})
         mmpbsa_dg = mol_mmpbsa.get("dG_total")
 
-        # Classify (with MMPBSA enhancement when available)
+        # Classify
         decision = classify_molecule(
             scores=scores,
             zone_coverage=zone_coverage,
@@ -501,6 +683,7 @@ def run_decision_report(
             zone_energy_cutoff=zone_energy_cutoff,
             min_zones_for_template=min_zones_for_template,
             grid_score_purchase_threshold=grid_score_purchase_threshold,
+            zones=active_zones,
         )
 
         # Enhance classification with MMPBSA if available
@@ -510,14 +693,14 @@ def run_decision_report(
             if mmpbsa_dg <= mmpbsa_dg_strong_threshold and n_zones >= min_zones_for_template:
                 decision["recommendation"] = "Strong Pharmit template candidate"
                 decision["reasoning"] = (
-                    f"MMPBSA ΔG {mmpbsa_dg:.1f} <= {mmpbsa_dg_strong_threshold} "
+                    f"MMPBSA dG {mmpbsa_dg:.1f} <= {mmpbsa_dg_strong_threshold} "
                     f"AND covers {n_zones} zones: {', '.join(decision['zones_covered'])}"
                 )
             elif mmpbsa_dg <= mmpbsa_dg_moderate_threshold and grid_score <= grid_score_purchase_threshold:
                 if decision["recommendation"] == "Weak candidate":
                     decision["recommendation"] = "Purchase candidate"
                     decision["reasoning"] = (
-                        f"MMPBSA ΔG {mmpbsa_dg:.1f} <= {mmpbsa_dg_moderate_threshold} "
+                        f"MMPBSA dG {mmpbsa_dg:.1f} <= {mmpbsa_dg_moderate_threshold} "
                         f"AND Grid Score {grid_score:.1f} <= {grid_score_purchase_threshold}"
                     )
 
@@ -525,9 +708,12 @@ def run_decision_report(
             "name": name,
             "scores": scores,
             "grid_score": scores.get("Grid_Score", 0),
+            "composite_score": pose_result["composite_score"],
+            "selected_pose_idx": selected_pose_idx,
+            "top5_poses": pose_result["top5"],
             "zone_coverage": zone_coverage,
             "zone_energies": zone_energies,
-            "ref_zone_energies": ref_zone_energies,
+            "ref_zone_energies": ref_zone_energies if ref_zone_energies else None,
             "plip_interactions": plip_interactions,
             "n_plip_interactions": len(plip_interactions),
             "mmpbsa_dg": mmpbsa_dg,
@@ -535,15 +721,34 @@ def run_decision_report(
             **decision,
         })
 
+        # Pose selection summary row
+        pose_selection_rows.append({
+            "Name": name,
+            "Selected_Pose_Index": selected_pose_idx,
+            "Composite_Score": pose_result["composite_score"],
+            "Grid_Score": scores.get("Grid_Score", 0),
+            "Recommendation": decision["recommendation"],
+            "N_Zones_Covered": decision["n_zones_covered"],
+        })
+
     # Sort by recommendation strength then grid score
     rec_order = {"Strong Pharmit template candidate": 0, "Purchase candidate": 1, "Weak candidate": 2}
     molecules.sort(key=lambda m: (rec_order.get(m["recommendation"], 3), m["grid_score"]))
 
     # --- Generate HTML report ---
-    html = generate_decision_html(molecules, campaign_id, ref_scores, reference_label)
+    html = generate_decision_html(
+        molecules, campaign_id, ref_scores, reference_label, active_zones,
+    )
     html_path = output_dir / "decision_report.html"
     html_path.write_text(html, encoding="utf-8")
     logger.info(f"  Saved: {html_path}")
+
+    # --- Generate pose selection summary CSV ---
+    if pose_selection_rows:
+        df_pose = pd.DataFrame(pose_selection_rows)
+        pose_csv = output_dir / "pose_selection_summary.csv"
+        df_pose.to_csv(pose_csv, index=False, encoding="utf-8")
+        logger.info(f"  Saved: {pose_csv}")
 
     # --- Generate summary CSV ---
     summary_rows = []
@@ -552,6 +757,8 @@ def run_decision_report(
             "Rank": i,
             "Name": mol["name"],
             "Grid_Score": mol["grid_score"],
+            "Composite_Score": mol["composite_score"],
+            "Selected_Pose_Index": mol["selected_pose_idx"],
             "MMPBSA_dG": mol.get("mmpbsa_dg"),
             "Recommendation": mol["recommendation"],
             "Zones_Covered": mol["n_zones_covered"],
@@ -576,6 +783,7 @@ def run_decision_report(
     logger.info(f"    Strong template: {n_strong}")
     logger.info(f"    Purchase:        {n_purchase}")
     logger.info(f"    Weak:            {n_weak}")
+    logger.info(f"  Selected poses exported to: {selected_poses_dir}")
     logger.info(f"{'=' * 60}")
 
     return {
@@ -586,4 +794,5 @@ def run_decision_report(
         "n_weak": n_weak,
         "html_path": str(html_path),
         "summary_csv": str(summary_csv),
+        "selected_poses_dir": str(selected_poses_dir),
     }

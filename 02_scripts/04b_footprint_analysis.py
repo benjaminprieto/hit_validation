@@ -69,6 +69,7 @@ def main():
     log_level = "INFO"
     reference_context_csv = None
     reference_context_label = "Reference"
+    zones = {}
 
     # --- Campaign config ---
     if args.campaigns:
@@ -92,10 +93,21 @@ def main():
         if rec_pdb.exists():
             receptor_pdb = str(rec_pdb)
 
-        # Reference context — imported pre-computed data from reference_docking
+        # Reference context — imported pre-computed data (configurable)
         ref_context = cc.get("reference_context", {})
         reference_context_csv = ref_context.get("footprint_csv")
         reference_context_label = ref_context.get("label", "Reference")
+
+        # Zones from campaign config
+        raw_zones = cc.get("zones", {})
+        for zone_id, zdef in raw_zones.items():
+            zones[zone_id] = {
+                "residues": set(zdef.get("residues", [])),
+                "label": zdef.get("label", zone_id),
+                "druglike": zdef.get("druglike", True),
+                "description": zdef.get("description", ""),
+                "color": zdef.get("color"),
+            }
 
     # --- Module config ---
     if args.config:
@@ -141,6 +153,7 @@ def main():
         campaign_id=campaign_id,
         reference_context_csv=reference_context_csv,
         reference_context_label=reference_context_label,
+        zones=zones if zones else None,
     )
 
     if not result.get("success"):

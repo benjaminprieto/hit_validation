@@ -10,8 +10,8 @@
 #
 # v2.0 (2026-03-25): Added GB/SA Hawkins implicit solvation.
 #   Corrects in-vacuo electrostatic artifacts (e.g., charge-charge
-#   repulsion between ASP494 carboxylate and UDX phosphates that is
-#   screened by water in reality but not in grid/footprint scoring).
+#   repulsion between charged residues that is screened by water in
+#   reality but not in grid/footprint scoring).
 #   GB/SA gives a GLOBAL solvation-corrected score per pose.
 #   Per-residue footprint remains in-vacuo (DOCK6 limitation).
 #
@@ -62,12 +62,12 @@ outputs:
 # Standard (in-vacuo footprint only):
 #   python 02_scripts/01d_footprint_rescore.py \
 #       --config 03_configs/01d_footprint_rescore.yaml \
-#       --campaigns 04_data/campaigns/UDX_reference_pH63/campaign_config.yaml
+#       --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
 #
 # With GB/SA Hawkins (implicit solvation):
 #   python 02_scripts/01d_footprint_rescore.py \
 #       --config 03_configs/01d_footprint_rescore.yaml \
-#       --campaigns 04_data/campaigns/UDX_reference_pH63/campaign_config.yaml \
+#       --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml \
 #       --gbsa-hawkins
 #
 # Or set gbsa_hawkins: true in this YAML for persistent activation.

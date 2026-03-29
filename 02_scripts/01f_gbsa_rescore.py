@@ -13,7 +13,7 @@ Output: 05_results/{campaigns}/01f_gbsa_rescore/{name}/{name}_gbsa_scored.mol2
 Usage:
     python 02_scripts/01f_gbsa_rescore.py \\
         --config 03_configs/01f_gbsa_rescore.yaml \\
-        --campaigns 04_data/campaigns/SD1_reference_pH63/campaign_config.yaml
+        --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
 
 Project: hit_validation
 Module: 01f (DOCK6)
