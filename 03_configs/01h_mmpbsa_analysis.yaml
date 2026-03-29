@@ -1,0 +1,40 @@
+# =============================================================================
+# 01h MMPBSA Analysis - Configuration (Hit Validation)
+# =============================================================================
+# Batch analysis of MMPBSA decomposition output from 01g.
+# Parses per-residue data, maps to PDB numbering, compares with footprint.
+#
+# INPUT:  05_results/{campaign}/01g_mmpbsa_decomp/{name}/mmpbsa/FINAL_DECOMP_MMPBSA.dat
+# OUTPUT: 05_results/{campaign}/01h_mmpbsa_analysis/
+#
+# Project: hit_validation
+# Module: 01h
+# Version: 1.0 (2026-03-28)
+# =============================================================================
+
+parameters:
+  # Compare MMPBSA decomposition with DOCK6 in-vacuo footprint (01d/04b)
+  compare_footprint: true
+
+  # Explicit path to footprint directory (null = auto-resolve from 04b)
+  footprint_dir: null
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "01h_mmpbsa_analysis"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# Standard (after 01g completes):
+#   python 02_scripts/01h_mmpbsa_analysis.py \
+#       --config 03_configs/01h_mmpbsa_analysis.yaml \
+#       --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
+#
+# Skip footprint comparison:
+#   python 02_scripts/01h_mmpbsa_analysis.py \
+#       --config 03_configs/01h_mmpbsa_analysis.yaml \
+#       --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml \
+#       --no-compare-footprint
+# =============================================================================

@@ -1,0 +1,80 @@
+# =============================================================================
+# 01g MMPBSA Per-Residue Decomposition - Configuration (Hit Validation)
+# =============================================================================
+# Batch MMPBSA per-residue decomposition for all validated hits.
+# Runs sequentially (1 molecule at a time on GPU).
+#
+# INPUT:  05_results/{campaign}/01c_dock6_run/{name}/{name}_scored.mol2
+# OUTPUT: 05_results/{campaign}/01g_mmpbsa_decomp/{name}/
+#
+# Project: hit_validation
+# Module: 01g
+# Version: 1.0 (2026-03-28)
+# =============================================================================
+
+parameters:
+
+  # Mode: "single_point" (fast, ~10 min/mol) or "md" (rigorous, ~60 min/mol)
+  mode: "md"
+
+  # Pose selection from scored mol2
+  pose_selection: "best_score"
+  pose_index: 1
+
+  # MMPBSA parameters
+  mmpbsa:
+    idecomp: 1        # per-residue decomposition
+    igb: 2            # OBC-II (Onufriev-Bashford-Case)
+    saltcon: 0.15     # 150 mM NaCl
+
+  # Force field
+  receptor_ff: "ff14SB"
+  ligand_ff: "gaff2"       # NOTE: GAFF2 for AMBER/tleap, NOT sybyl
+  charge_method: "bcc"     # AM1-BCC
+
+  # MD Protocol (only used when mode = md)
+  md:
+    engine: "openmm"
+    production_ns: 5.0
+    dt: 0.002
+    temperature: 300.0
+    pressure: 1.0
+    save_interval_ps: 10.0
+    mmpbsa_interval_ps: 100.0
+    solvent_padding: 10.0
+    ionic_strength: 0.15
+    heating_ps: 100.0
+    equilibration_ps: 500.0
+    minimization:
+      restraint_k: 10.0
+      restrained_steps: 5000
+      unrestrained_steps: 5000
+
+  # Antechamber timeout (per molecule) — generous for large molecules
+  antechamber_timeout: 600
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "01g_mmpbsa_decomp"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# Full batch (all molecules, MD mode — ~60 min × N molecules):
+#   python 02_scripts/01g_mmpbsa_decomp.py \
+#       --config 03_configs/01g_mmpbsa_decomp.yaml \
+#       --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
+#
+# Single molecule only:
+#   python 02_scripts/01g_mmpbsa_decomp.py \
+#       --config 03_configs/01g_mmpbsa_decomp.yaml \
+#       --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml \
+#       --molecule MOL_001
+#
+# Fast mode (single_point, ~10 min × N):
+#   python 02_scripts/01g_mmpbsa_decomp.py \
+#       --config 03_configs/01g_mmpbsa_decomp.yaml \
+#       --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml \
+#       --mode single_point
+# =============================================================================

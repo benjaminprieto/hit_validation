@@ -1,0 +1,37 @@
+# =============================================================================
+# Hit Validation Campaign — UDX Control Test
+# =============================================================================
+campaign_id: "hit_validation"
+
+target:
+  name: "XT1"
+  pdb_id: "6EJ7"
+
+receptor:
+  pdb: "receptor/XT1_6EJ7.pdb"
+  chain: "A"
+  protonation:
+    enabled: true
+    tool: "pdb2pqr"
+    force_field: "AMBER"
+
+docking_ph: 6.3
+
+ligands_dir: "ligands/"
+
+reference_mol2: "reference/UDX.mol2"
+
+grids:
+  precomputed_grids_dir: null
+  generate: true
+  binding_site:
+    method: "reference_ligand"
+    reference_mol2: "reference/UDX.mol2"
+
+reference_context:
+  label: "UDX (crystallographic)"
+  scores_csv: null
+  plip_json: null
+  footprint_csv: null
+
+pharmit_template_molecule: null

@@ -1,0 +1,37 @@
+# =============================================================================
+# 07a Decision Report - Configuration (Hit Validation)
+# =============================================================================
+# Generate consolidated per-molecule validation evidence report.
+# Classification uses absolute energy thresholds; reference data is informational.
+#
+# INPUT:  01e scores, 03a PLIP, 04b footprint analysis
+# OUTPUT: 05_results/{campaign}/07a_decision_report/
+#
+# Project: hit_validation
+# Module: 07a
+# Version: 1.0 (2026-03-27)
+# =============================================================================
+
+parameters:
+  # Reference data paths (auto-resolved from campaign_config.reference_context)
+  reference_scores_path: null
+  reference_plip_path: null
+  reference_footprint_path: null
+
+  # Decision thresholds
+  zone_energy_cutoff: -0.5         # Absolute energy cutoff for zone coverage (kcal/mol)
+  min_zones_for_template: 2        # Minimum zones covered for "strong template"
+  grid_score_purchase_threshold: -30.0  # Grid Score threshold for purchase candidate
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "07a_decision_report"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# python 02_scripts/07a_decision_report.py \
+#     --config 03_configs/07a_decision_report.yaml \
+#     --campaigns 04_data/campaigns/NAMIKI_top20_pH63/campaign_config.yaml
+# =============================================================================
