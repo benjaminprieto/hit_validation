@@ -33,3 +33,7 @@ grid.bmp
 # Logs (keep in 05_results, not in project root)
 *.log
 !check_dependencies.sh
+
+# Antechamber temp files
+ANTECHAMBER_*
+ATOMTYPE.INF

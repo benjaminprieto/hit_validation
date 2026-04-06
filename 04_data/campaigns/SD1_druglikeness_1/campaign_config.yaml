@@ -1,0 +1,103 @@
+# =============================================================================
+# Hit Validation Campaign Configuration — SD1_druglikeness_1
+# =============================================================================
+# Validates 20 molecules from SD1_pharmit_pH63_SD1_1 screening.
+# Dual strategy: A (UDP-xylose competitive) + B (catalytic site blocker).
+# Zones informed by Briggs & Hohenester 2018 mutagenesis data.
+#
+# Project: hit_validation
+# Source: molecular_docking/SD1_pharmit_pH63_SD1_1/07b_hit_export
+# =============================================================================
+
+campaign_id: "SD1_druglikeness_1"
+
+target:
+  name: "XT1"
+  pdb_id: "6EJ7"
+
+receptor:
+  pdb: "receptor/XT1_6EJ7.pdb"
+  chain: "A"
+  protonation:
+    enabled: true
+    tool: "pdb2pqr"
+    force_field: "AMBER"
+
+docking_ph: 6.3
+
+ligands_dir: "ligands/"
+
+grids:
+  precomputed_grids_dir: null
+  generate: true
+  binding_site:
+    method: "reference_ligand"
+    reference_mol2: "reference/SD1.mol2"
+
+# =============================================================================
+# BINDING SITE ZONES (Briggs & Hohenester 2018, Structure 26:801-809)
+# =============================================================================
+# Zones A-E: UDP-xylose pocket (Strategy A targets)
+# Zone F: Peptide acceptor cleft (Strategy B targets)
+# E529 bridges both strategies (catalytic base, E529A = 0% activity)
+# =============================================================================
+zones:
+  zone_A:
+    label: "Salt bridge pocket"
+    residues: ["ARG598", "LYS599"]
+    druglike: false
+    description: "Phosphate binding. cis-peptide bond R598-K599. RKAA mutant = 0% activity (Briggs Fig 4C)."
+  zone_B:
+    label: "Aromatic pocket"
+    residues: ["TRP392", "TRP495", "TYR565", "SER575"]
+    druglike: true
+    description: "Xylose pocket. W392 C5 contact excludes hexoses (Briggs Fig 2B). Strategy A primary target."
+  zone_C:
+    label: "Polar pocket"
+    residues: ["ASP361", "ARG363"]
+    druglike: true
+    description: "Uracil recognition. Polar/charged interactions."
+  zone_D:
+    label: "Base recognition"
+    residues: ["HIS335", "VAL333", "THR390"]
+    druglike: true
+    description: "Ribose/nucleobase stacking and HBD/HBA contacts."
+  zone_E:
+    label: "Catalytic"
+    residues: ["GLU529", "ASP494"]
+    druglike: true
+    description: "E529 = catalytic base, deprotonates Ser for nucleophilic attack (E529A = 0% activity). D494 = polar xylose contact (D494A = 0% activity). Briggs Fig 4C."
+  zone_F:
+    label: "Peptide cleft"
+    residues: ["GLN462", "LYS461", "ARG557"]
+    druglike: true
+    description: "Acceptor peptide binding cleft. K461/Q462 constriction at +1 position. Delta563-572 flap deletion = 0% activity. Strategy B primary target. Briggs Fig 3A."
+
+# =============================================================================
+# REFERENCE CONTEXT (SD1 from reference_docking)
+# =============================================================================
+reference_context:
+  label: "SD1_reference"
+  scores_csv: "/home/bprieto/projects/reference_docking/05_results/SD1_reference_pH63/01e_score_collection/dock6_scores.csv"
+  plip_json: "/home/bprieto/projects/reference_docking/05_results/SD1_reference_pH63/03a_plip_analysis/interactions.json"
+  footprint_csv: "/home/bprieto/projects/reference_docking/05_results/SD1_reference_pH63/04_dock6_analysis/04b_footprint_analysis/residue_consensus.csv"
+
+# =============================================================================
+# FUNCTIONAL RESIDUES (for 07c annotation)
+# =============================================================================
+functional_residues:
+  GLU529:
+    function: "Catalytic base"
+    evidence: "E529A abolishes activity (Briggs & Hohenester 2018)"
+  ASP494:
+    function: "UDP-sugar binding"
+    evidence: "D494A/N reduces activity (Briggs & Hohenester 2018)"
+  ARG598:
+    function: "Diphosphate coordination"
+    evidence: "R598A/K599A reduces activity (Briggs & Hohenester 2018)"
+  LYS599:
+    function: "Diphosphate coordination"
+    evidence: "R598A/K599A reduces activity (Briggs & Hohenester 2018)"
+  TRP392:
+    function: "Substrate selectivity"
+    evidence: "Excludes non-substrate sugars (Briggs & Hohenester 2018)"

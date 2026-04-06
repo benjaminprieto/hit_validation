@@ -119,7 +119,7 @@ def main():
 
     # 1. Output from 00a_ligand_preparation (primary source in hit_validation)
     ligand_dir_00a = Path("05_results") / campaign_id / "00a_ligand_preparation"
-    if ligand_dir_00a.exists() and list(ligand_dir_00a.glob("*.mol2")):
+    if ligand_dir_00a.exists() and list(ligand_dir_00a.glob("*/*.mol2")):
         ligand_dir = str(ligand_dir_00a)
         logger.info(f"Using ligands from 00a: {ligand_dir}")
 

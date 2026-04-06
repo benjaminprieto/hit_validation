@@ -14,7 +14,7 @@ Input molecules are screening hits from mol2/SDF files.
 
 Pipeline per molecule:
     1. If SDF -> convert to mol2 with OpenBabel
-    2. pH-aware protonation with ionization package
+    2. pH-aware protonation (obabel default, configurable)
     3. Run antechamber with 3-tier fallback
     4. Validate output mol2 (atom count, charges, Sybyl types)
     5. Log which tier was used
@@ -72,24 +72,30 @@ def convert_sdf_to_mol2(sdf_path: str, output_mol2: str) -> bool:
 # PH-AWARE PROTONATION
 # =============================================================================
 
-def protonate_at_ph(input_mol2: str, output_mol2: str, ph: float = 6.3) -> bool:
+def protonate_at_ph(input_mol2: str, output_mol2: str, ph: float = 6.3,
+                    tool: str = "obabel") -> bool:
     """
-    Protonate molecule at target pH using ionization package.
+    Protonate molecule at target pH.
 
-    Falls back to obabel -p if ionization is not available.
+    Args:
+        input_mol2: Input mol2 path
+        output_mol2: Output mol2 path
+        ph: Target pH
+        tool: "obabel" (recommended, same as molecular_docking) or
+              "ionization" (Dimorphite-DL, generates charged species that may crash sqm)
     """
-    # Try ionization package first
-    try:
-        from ionization import protonate_mol2
-        protonate_mol2(input_mol2, output_mol2, ph=ph)
-        if Path(output_mol2).exists() and Path(output_mol2).stat().st_size > 0:
-            return True
-    except ImportError:
-        logger.debug("  ionization package not available, falling back to obabel")
-    except Exception as e:
-        logger.debug(f"  ionization failed: {e}, falling back to obabel")
+    if tool == "ionization":
+        try:
+            from ionization import protonate_mol2
+            protonate_mol2(input_mol2, output_mol2, ph=ph)
+            if Path(output_mol2).exists() and Path(output_mol2).stat().st_size > 0:
+                return True
+        except ImportError:
+            logger.debug("  ionization package not available, falling back to obabel")
+        except Exception as e:
+            logger.debug(f"  ionization failed: {e}, falling back to obabel")
 
-    # Fallback: obabel protonation
+    # obabel protonation (default, same as molecular_docking)
     try:
         result = subprocess.run(
             ["obabel", input_mol2, "-O", output_mol2, "-p", str(ph)],
@@ -114,12 +120,15 @@ def run_antechamber_tier1(input_mol2: str, output_mol2: str,
     This is the gold standard for DOCK6 compatibility.
     May fail on large molecules (>79 atoms) due to AM1 QM timeout.
     """
+    abs_input = str(Path(input_mol2).resolve())
+    abs_output = str(Path(output_mol2).resolve())
+    out_dir = str(Path(abs_output).parent)
     cmd = [
         "antechamber",
         "-fi", "mol2",
         "-fo", "mol2",
-        "-i", input_mol2,
-        "-o", output_mol2,
+        "-i", abs_input,
+        "-o", abs_output,
         "-c", "bcc",       # AM1-BCC charges
         "-at", "sybyl",    # Sybyl atom types (MUST for DOCK6)
         "-pf", "y",        # Remove intermediate files
@@ -128,6 +137,7 @@ def run_antechamber_tier1(input_mol2: str, output_mol2: str,
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
+            cwd=out_dir,
         )
         success = (result.returncode == 0
                     and Path(output_mol2).exists()
@@ -154,12 +164,15 @@ def run_antechamber_tier2(input_mol2: str, output_mol2: str,
     Fast fallback -- no QM calculation. Solves timeouts on large molecules.
     Charge quality is lower than AM1-BCC but sufficient for docking.
     """
+    abs_input = str(Path(input_mol2).resolve())
+    abs_output = str(Path(output_mol2).resolve())
+    out_dir = str(Path(abs_output).parent)
     cmd = [
         "antechamber",
         "-fi", "mol2",
         "-fo", "mol2",
-        "-i", input_mol2,
-        "-o", output_mol2,
+        "-i", abs_input,
+        "-o", abs_output,
         "-c", "gas",        # Gasteiger charges (fast, no QM)
         "-at", "sybyl",     # Sybyl atom types (MUST for DOCK6)
         "-pf", "y",
@@ -168,6 +181,7 @@ def run_antechamber_tier2(input_mol2: str, output_mol2: str,
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
+            cwd=out_dir,
         )
         success = (result.returncode == 0
                     and Path(output_mol2).exists()
@@ -220,6 +234,7 @@ def prepare_single_molecule(
         charge_method: str = "bcc",
         docking_ph: float = 6.3,
         timeout: int = 300,
+        protonation_tool: str = "obabel",
 ) -> Dict[str, Any]:
     """
     Prepare a single molecule with 3-tier antechamber fallback.
@@ -235,8 +250,8 @@ def prepare_single_molecule(
     Returns:
         Dict with success, tier, method, warnings
     """
-    inp = Path(input_path)
-    out = Path(output_mol2)
+    inp = Path(input_path).resolve()
+    out = Path(output_mol2).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
     warnings = []
@@ -257,7 +272,7 @@ def prepare_single_molecule(
 
     # Step 2: Protonate at target pH
     protonated_mol2 = str(out.parent / f"{inp.stem}_protonated.mol2")
-    if not protonate_at_ph(work_mol2, protonated_mol2, docking_ph):
+    if not protonate_at_ph(work_mol2, protonated_mol2, docking_ph, tool=protonation_tool):
         protonated_mol2 = work_mol2
         warnings.append("Protonation failed, using unprotonated input")
 
@@ -373,6 +388,7 @@ def run_ligand_preparation(
         docking_ph: float = 6.3,
         timeout_per_molecule: int = 300,
         molecule_filter: Optional[List[str]] = None,
+        protonation_tool: str = "obabel",
 ) -> Dict[str, Any]:
     """
     Prepare N screening hit ligands for DOCK6 validation docking.
@@ -420,6 +436,7 @@ def run_ligand_preparation(
     logger.info(f"  Atom type:   {atom_type}")
     logger.info(f"  Charges:     {charge_method}")
     logger.info(f"  pH:          {docking_ph}")
+    logger.info(f"  Protonation: {protonation_tool}")
     logger.info(f"  Timeout:     {timeout_per_molecule}s per molecule")
 
     results = []
@@ -441,6 +458,7 @@ def run_ligand_preparation(
             charge_method=charge_method,
             docking_ph=docking_ph,
             timeout=timeout_per_molecule,
+            protonation_tool=protonation_tool,
         )
         runtime = time.time() - t0
         total_time += runtime

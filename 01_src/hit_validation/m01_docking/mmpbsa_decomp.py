@@ -114,7 +114,7 @@ quit
 MMPBSA_INPUT_TEMPLATE = """\
 &general
   startframe={startframe}, endframe={endframe}, interval={interval},
-  verbose=2, keep_files=0,
+  verbose=2, keep_files=2,
 /
 &gb
   igb={igb}, saltcon={saltcon},

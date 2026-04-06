@@ -1,0 +1,105 @@
+# =============================================================================
+# Hit Validation Campaign Configuration
+# =============================================================================
+# This template defines everything about a validation experiment.
+# Copy this directory for each new campaign, fill in your system-specific values.
+#
+# Project: hit_validation
+# =============================================================================
+campaign_id: "druglikeness_1"
+
+target:
+  name: "XT1"
+  pdb_id: "6EJ7"
+
+receptor:
+  pdb: "receptor/XT1_6EJ7.pdb"
+  chain: "A"
+  protonation:
+    enabled: true
+    tool: "pdb2pqr"
+    force_field: "AMBER"
+
+docking_ph: 6.3
+
+ligands_dir: "ligands/"
+
+grids:
+  precomputed_grids_dir: null     # Set path to skip 00d + 01b
+  generate: true
+  binding_site:
+    method: "reference_ligand"          # DEFAULT: usa ligando de referencia para generar esferas + box
+    reference_mol2: "reference/SD1.mol2"  # Mol2 del ligando de referencia (coordenadas cristalográficas)
+    # Alternativa: method: "residues" con lista de residuos (no recomendado)
+    # residues: ["TRP392", "TRP495", "TYR565", "SER575", "HIS335",
+    #            "ASP361", "ARG363", "GLU529", "ARG598", "LYS599"]
+
+# =============================================================================
+# BINDING SITE ZONES
+# =============================================================================
+# Define sub-pocket zones for analysis in modules 04b, 01h, and 07a.
+# Each zone groups residues that form a functional pocket.
+# Zone names are arbitrary — use descriptive labels for your system.
+zones:
+  zone_A:
+    label: "Salt bridge pocket"
+    residues: ["ARG598", "LYS599"]
+    druglike: false
+    description: "Charged interactions, may require non-drug-like groups."
+  zone_B:
+    label: "Aromatic pocket"
+    residues: ["TRP392", "TRP495", "TYR565", "SER575"]
+    druglike: true
+    description: "Aromatic/HBA interactions, drug-like compatible."
+  zone_C:
+    label: "Polar pocket"
+    residues: ["ASP361", "ARG363"]
+    druglike: true
+    description: "Polar interactions, selective recognition."
+  zone_D:
+    label: "Base recognition"
+    residues: ["HIS335", "VAL333", "THR390"]
+    druglike: true
+    description: "Aromatic stacking + HBA/HBD."
+  zone_E:
+    label: "Catalytic"
+    residues: ["GLU529", "ASP494"]
+    druglike: true
+    description: "E529 catalytic base + D494 substrate binding. Both essential (Briggs 2018)."
+  zone_F:
+    label: "Peptide cleft"
+    residues: ["GLN462", "LYS461", "ARG557"]
+    druglike: true
+    description: "Acceptor peptide binding. Flap deletion abolishes activity (Briggs 2018)."
+
+# =============================================================================
+# REFERENCE CONTEXT (optional)
+# =============================================================================
+# Pre-computed reference data for comparison in output tables.
+# Can be from reference_docking (e.g., crystallographic ligand) or a prior
+# hit_validation iteration. If not needed, set all paths to null.
+reference_context:
+  label: "Reference"
+  scores_csv: null       # Path to reference dock6_scores.csv
+  plip_json: null        # Path to reference interactions.json
+  footprint_csv: null    # Path to reference residue_consensus.csv
+
+# =============================================================================
+# FUNCTIONAL RESIDUES (for 07c annotation)
+# =============================================================================
+functional_residues:
+  GLU529:
+    function: "Catalytic base"
+    evidence: "E529A abolishes activity (Briggs & Hohenester 2018)"
+  ASP494:
+    function: "UDP-sugar binding"
+    evidence: "D494A/N reduces activity (Briggs & Hohenester 2018)"
+  ARG598:
+    function: "Diphosphate coordination"
+    evidence: "R598A/K599A reduces activity (Briggs & Hohenester 2018)"
+  LYS599:
+    function: "Diphosphate coordination"
+    evidence: "R598A/K599A reduces activity (Briggs & Hohenester 2018)"
+  TRP392:
+    function: "Substrate selectivity"
+    evidence: "Excludes non-substrate sugars (Briggs & Hohenester 2018)"

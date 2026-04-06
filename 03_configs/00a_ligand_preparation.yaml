@@ -26,7 +26,12 @@ parameters:
   charge_method: "bcc"
 
   # Timeout per molecule in seconds (AM1-BCC QM can be slow for large molecules)
-  timeout_per_molecule: 300
+  timeout_per_molecule: 1200
+
+  # Protonation tool for ligands before antechamber.
+  # "obabel"   -> OpenBabel -p pH (same as molecular_docking, recommended)
+  # "ionization" -> ionization package / Dimorphite-DL (generates charged species that crash sqm)
+  protonation_tool: "obabel"
 
   log_level: "INFO"
 

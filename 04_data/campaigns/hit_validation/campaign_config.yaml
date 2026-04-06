@@ -63,9 +63,14 @@ zones:
     description: "Aromatic stacking + HBA/HBD."
   zone_E:
     label: "Catalytic"
-    residues: ["GLU529"]
+    residues: ["GLU529", "ASP494"]
     druglike: true
-    description: "Functionally critical residue."
+    description: "E529 catalytic base + D494 substrate binding. Both essential (Briggs 2018)."
+  zone_F:
+    label: "Peptide cleft"
+    residues: ["GLN462", "LYS461", "ARG557"]
+    druglike: true
+    description: "Acceptor peptide binding. Flap deletion abolishes activity (Briggs 2018)."
 
 # =============================================================================
 # REFERENCE CONTEXT (optional)
@@ -78,3 +83,23 @@ reference_context:
   scores_csv: null       # Path to reference dock6_scores.csv
   plip_json: null        # Path to reference interactions.json
   footprint_csv: null    # Path to reference residue_consensus.csv
+
+# =============================================================================
+# FUNCTIONAL RESIDUES (for 07c annotation)
+# =============================================================================
+functional_residues:
+  GLU529:
+    function: "Catalytic base"
+    evidence: "E529A abolishes activity (Briggs & Hohenester 2018)"
+  ASP494:
+    function: "UDP-sugar binding"
+    evidence: "D494A/N reduces activity (Briggs & Hohenester 2018)"
+  ARG598:
+    function: "Diphosphate coordination"
+    evidence: "R598A/K599A reduces activity (Briggs & Hohenester 2018)"
+  LYS599:
+    function: "Diphosphate coordination"
+    evidence: "R598A/K599A reduces activity (Briggs & Hohenester 2018)"
+  TRP392:
+    function: "Substrate selectivity"
+    evidence: "Excludes non-substrate sugars (Briggs & Hohenester 2018)"

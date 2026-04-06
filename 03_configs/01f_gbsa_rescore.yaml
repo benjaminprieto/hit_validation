@@ -20,13 +20,13 @@
 
 parameters:
   dock6_home: "/opt/dock6"
-  timeout_per_molecule: 600
+  timeout_per_molecule: 7200
 
   # Simplex minimization before GB/SA scoring.
   # DOCK6 docs recommend minimizing before GB/SA (sensitive to geometry).
   # For hit validation: true (docked poses benefit from relaxation).
   # In reference_docking: false (crystal geometry is sacred).
-  minimize: true
+  minimize: false
 
   # Solvent dielectric constant (78.5 = water at 25°C)
   solvent_dielectric: 78.5

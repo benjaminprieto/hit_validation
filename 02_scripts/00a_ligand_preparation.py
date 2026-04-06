@@ -64,6 +64,7 @@ def main():
     atom_type = params.get("atom_type", "sybyl")
     charge_method = params.get("charge_method", "bcc")
     timeout = params.get("timeout_per_molecule", 300)
+    protonation_tool = params.get("protonation_tool", "obabel")
 
     log_level = args.log_level or params.get("log_level", "INFO")
     logging.getLogger().setLevel(getattr(logging, log_level.upper()))
@@ -85,6 +86,7 @@ def main():
         charge_method=charge_method,
         docking_ph=docking_ph,
         timeout_per_molecule=timeout,
+        protonation_tool=protonation_tool,
     )
 
     if not result.get("success"):

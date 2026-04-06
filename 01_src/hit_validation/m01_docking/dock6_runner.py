@@ -600,7 +600,11 @@ def run_dock6_batch(
         return {"n_total": 0, "n_ok": 0, "n_failed": 0, "error": "dock6 not in PATH"}
 
     # --- Find ligand mol2 files ---
+    # 00a outputs mol2 in subdirs: {name}/{name}.mol2
+    # campaign ligands/ has mol2 at root level
     mol2_files = sorted(ligand_dir.glob("*.mol2"))
+    if not mol2_files:
+        mol2_files = sorted(ligand_dir.glob("*/*.mol2"))
 
     # Skip empty or broken mol2 files
     valid_mol2 = []

@@ -26,12 +26,23 @@ import sys
 import yaml
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+)
 sys.path.insert(0, str(Path(__file__).parent.parent / "01_src"))
 
 from hit_validation.m01_docking.gbsa_rescore import run_gbsa_rescore
 
 logger = logging.getLogger(__name__)
+
+
+def setup_log_file(log_path: Path, log_level: str = "INFO"):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = logging.FileHandler(str(log_path), encoding="utf-8")
+    fh.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s"))
+    logging.getLogger().addHandler(fh)
 
 
 def load_yaml(path):
@@ -77,6 +88,8 @@ def main():
 
     log_level = args.log_level or params.get("log_level", "INFO")
     logging.getLogger().setLevel(getattr(logging, log_level.upper()))
+    log_path = Path(output_dir) / "01f_gbsa_rescore.log"
+    setup_log_file(log_path, log_level)
 
     logger.info("=" * 60)
     logger.info("  HIT_VALIDATION - Module 01f: GB/SA Hawkins Rescore")
