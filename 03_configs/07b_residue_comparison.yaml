@@ -1,0 +1,37 @@
+# =============================================================================
+# 07b Residue Comparison Report - Configuration (Hit Validation)
+# =============================================================================
+# Residue-by-residue comparison of hits vs crystallographic reference.
+# Shows WHERE each hit wins or loses vs UDX — the "why" behind 07a decisions.
+#
+# INPUT:  05_results/{campaign}/04_dock6_analysis/04b_footprint_analysis/footprint_per_molecule.csv
+# OUTPUT: 05_results/{campaign}/07b_residue_comparison/
+#
+# Project: hit_validation
+# Module: 07b
+# Version: 2.0 (2026-04-02)
+# =============================================================================
+
+parameters:
+  # Minimum |energy| to include a residue in the comparison
+  energy_cutoff: 0.5
+
+  # Delta thresholds for color coding
+  delta_better_threshold: -1.0    # green if delta < this
+  delta_worse_threshold: 1.0      # red if delta > this
+
+  # Include PLIP interactions (requires 03a output)
+  include_plip: true
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "07b_residue_comparison"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# python 02_scripts/07b_residue_comparison.py \
+#     --config 03_configs/07b_residue_comparison.yaml \
+#     --campaigns 04_data/campaigns/druglikeness_1/campaign_config.yaml
+# =============================================================================

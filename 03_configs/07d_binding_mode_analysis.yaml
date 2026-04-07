@@ -1,0 +1,47 @@
+# =============================================================================
+# 07d Binding Mode Analysis - Configuration (Hit Validation)
+# =============================================================================
+# Compares molecules by binding mode. Clusters by IEV similarity,
+# detects emergent sub-pockets from co-contact network.
+#
+# INPUT:  04b footprint_per_molecule.csv
+# OUTPUT: 05_results/{campaign}/07d_binding_mode_analysis/
+#
+# Project: hit_validation
+# Module: 07d
+# Version: 1.0
+# =============================================================================
+
+parameters:
+
+  # Minimum |energy| for a residue to be included (kcal/mol)
+  energy_cutoff: 0.5
+
+  # Similarity metric for IEV clustering
+  # Options: pearson, cosine, tanimoto_binary
+  similarity_method: "pearson"
+
+  # Layer 3: minimum molecules for co-contact edge
+  cocontact_min_weight: 2
+
+  # Layer 3: Louvain resolution (higher = more communities)
+  community_resolution: 1.0
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "07d_binding_mode_analysis"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# python 02_scripts/07d_binding_mode_analysis.py \
+#     --config 03_configs/07d_binding_mode_analysis.yaml \
+#     --campaigns 04_data/campaigns/druglikeness_1/campaign_config.yaml
+#
+# Skip ProLIF:
+#   --no-prolif
+#
+# Skip community detection:
+#   --no-communities
+# =============================================================================

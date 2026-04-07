@@ -1,0 +1,50 @@
+# =============================================================================
+# 07c Integrated Residue Analysis - Configuration (Hit Validation)
+# =============================================================================
+# Per-residue, per-molecule report integrating all pipeline evidence.
+# Works incrementally: missing data sources marked as "pending".
+#
+# INPUT:  04b footprint, 01h MMPBSA, 03a PLIP (opt), 01i MD (opt)
+# OUTPUT: 05_results/{campaign}/07c_integrated_analysis/
+#
+# Project: hit_validation
+# Module: 07c
+# Version: 1.0
+# =============================================================================
+
+parameters:
+
+  # Q3: Minimum |energy| to include a residue (kcal/mol)
+  energy_cutoff: 0.5
+
+  # Q1: MMPBSA dG thresholds
+  mmpbsa_reject_threshold: 0.0    # dG > 0 -> REJECT
+  mmpbsa_weak_threshold: -15.0    # dG > -15 -> WEAK
+
+  # Q2: RMSD thresholds (Angstrom)
+  rmsd_unstable_threshold: 4.0    # RMSD_avg > 4.0 -> UNSTABLE
+  rmsd_mobile_threshold: 2.0      # RMSD_avg > 2.0 -> MOBILE
+
+  # Q5: MD contact thresholds (fraction of frames)
+  contact_persistent_threshold: 0.70
+  contact_transient_threshold: 0.30
+
+  # Q4: Desolvation trap detection
+  desolvation_trap_fp_threshold: -2.0      # fp_total < -2.0 AND
+  desolvation_trap_mmpbsa_threshold: -0.5  # mmpbsa_total > -0.5 -> trap
+
+  # Consistency matrix: top N residues per molecule
+  top_residues_for_consistency: 10
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "07c_integrated_analysis"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# python 02_scripts/07c_integrated_analysis.py \
+#     --config 03_configs/07c_integrated_analysis.yaml \
+#     --campaigns 04_data/campaigns/druglikeness_1/campaign_config.yaml
+# =============================================================================

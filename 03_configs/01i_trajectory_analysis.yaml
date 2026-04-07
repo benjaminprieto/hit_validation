@@ -1,0 +1,55 @@
+# =============================================================================
+# 01i Trajectory Analysis - Configuration (Hit Validation)
+# =============================================================================
+# Extracts per-frame data from MD trajectories using cpptraj and ProLIF.
+#
+# INPUT:  05_results/{campaign}/01g_mmpbsa_decomp/{name}/
+# OUTPUT: 05_results/{campaign}/01i_trajectory_analysis/{name}/
+#
+# Project: hit_validation
+# Module: 01i
+# Version: 1.0
+# =============================================================================
+
+parameters:
+
+  # Ligand residue name in AMBER topology (tleap assigns "UNL" by default)
+  lig_resname: "UNL"
+
+  # Number of protein residues (for cpptraj mask :1-N)
+  n_protein_res: 706
+
+  # cpptraj timeout per molecule (seconds)
+  cpptraj_timeout: 600
+
+  # Solvated trajectory timeout (water bridges — much larger topology)
+  cpptraj_solvated_timeout: 3600
+
+  # Run ProLIF fingerprint analysis (requires prolif + MDAnalysis)
+  run_prolif: true
+
+  log_level: "INFO"
+
+outputs:
+  subdir: "01i_trajectory_analysis"
+
+# =============================================================================
+# USAGE
+# =============================================================================
+# All molecules:
+#   python 02_scripts/01i_trajectory_analysis.py \
+#       --config 03_configs/01i_trajectory_analysis.yaml \
+#       --campaigns 04_data/campaigns/druglikeness_1/campaign_config.yaml
+#
+# Specific molecules:
+#   python 02_scripts/01i_trajectory_analysis.py \
+#       --config 03_configs/01i_trajectory_analysis.yaml \
+#       --campaigns 04_data/campaigns/druglikeness_1/campaign_config.yaml \
+#       --molecules PubChem-146072367 PubChem-59068465
+#
+# Skip ProLIF (cpptraj only):
+#   python 02_scripts/01i_trajectory_analysis.py \
+#       --config 03_configs/01i_trajectory_analysis.yaml \
+#       --campaigns 04_data/campaigns/druglikeness_1/campaign_config.yaml \
+#       --no-prolif
+# =============================================================================
