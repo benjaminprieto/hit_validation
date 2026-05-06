@@ -25,6 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | 
 sys.path.insert(0, str(Path(__file__).parent.parent / "01_src"))
 
 from hit_validation.m07_decision_report.residue_comparison import run_residue_comparison
+from hit_validation.utils.paths import resolve_footprint_analysis_dir
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ def main():
     parser.add_argument("--output", "-o", type=str, default=None)
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--n-replicas", type=int, default=1,
+                        help="Number of replicas. When >1, footprint is read from "
+                             "04b_footprint_analysis/consolidated/.")
     args = parser.parse_args()
 
     cc = load_yaml(args.campaigns)
@@ -79,16 +83,28 @@ def main():
     results_base = Path("05_results") / campaign_id
 
     # --- Footprint CSV (obligatory) ---
-    footprint_csv = str(
-        results_base / "04_dock6_analysis" / "04b_footprint_analysis"
-        / "footprint_per_molecule.csv"
-    )
+    n_replicas = max(1, int(args.n_replicas))
+    footprint_csv = None
+    if n_replicas > 1:
+        cand = results_base / "04b_footprint_analysis" / "consolidated" / "footprint_per_molecule.csv"
+        if cand.exists():
+            footprint_csv = str(cand)
+    if footprint_csv is None:
+        footprint_csv = str(
+            resolve_footprint_analysis_dir(results_base) / "footprint_per_molecule.csv"
+        )
 
     # --- Optional inputs ---
     # PLIP analysis dir
-    plip_analysis_dir = str(results_base / "03a_plip_analysis")
-    if not Path(plip_analysis_dir).exists():
-        plip_analysis_dir = None
+    plip_analysis_dir = None
+    if n_replicas > 1:
+        cand = results_base / "03a_plip_analysis" / "consolidated"
+        if cand.exists():
+            plip_analysis_dir = str(cand)
+    if plip_analysis_dir is None:
+        plip_analysis_dir = str(results_base / "03a_plip_analysis")
+        if not Path(plip_analysis_dir).exists():
+            plip_analysis_dir = None
 
     # 07a decision summary
     decision_summary_csv = str(

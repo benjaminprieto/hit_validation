@@ -811,7 +811,9 @@ def run_footprint_analysis(
     if df_ref_context is not None:
         ref_energy_map = {}
         for _, rrow in df_ref_context.iterrows():
-            ref_energy_map[rrow["residue_id"]] = (rrow.get("vdw", 0.0), rrow.get("es", 0.0))
+            vdw_val = rrow.get("vdw", rrow.get("mean_vdw", 0.0))
+            es_val = rrow.get("es", rrow.get("mean_es", 0.0))
+            ref_energy_map[rrow["residue_id"]] = (vdw_val, es_val)
         df_consensus["ref_vdw"] = df_consensus["residue_id"].map(
             lambda rid: round(ref_energy_map.get(rid, (0.0, 0.0))[0], 4)
         )
@@ -956,8 +958,10 @@ def run_footprint_analysis(
                     zone_total = 0.0
                     covered = False
                 else:
-                    zone_vdw = zone_ref_rows["vdw"].sum()
-                    zone_es = zone_ref_rows["es"].sum()
+                    vdw_col = "vdw" if "vdw" in zone_ref_rows.columns else "mean_vdw"
+                    es_col = "es" if "es" in zone_ref_rows.columns else "mean_es"
+                    zone_vdw = zone_ref_rows[vdw_col].sum()
+                    zone_es = zone_ref_rows[es_col].sum()
                     zone_total = zone_vdw + zone_es
                     covered = zone_total < -0.5
 
@@ -1042,5 +1046,200 @@ def run_footprint_analysis(
         "hit_vs_ref_csv": str(hit_vs_ref_csv) if hit_vs_ref_csv else None,
         "subpocket_coverage_csv": str(subpocket_csv) if subpocket_csv else None,
         "ranking_by_zone_csv": str(ranking_csv) if ranking_csv else None,
+        "output_dir": str(output_dir),
+    }
+
+
+# =============================================================================
+# REPLICA CONSOLIDATION
+# =============================================================================
+
+def consolidate_footprint_analysis_replicas(
+    replica_dirs: List[Path],
+    output_dir: Path,
+) -> Dict:
+    """
+    Consolidate footprint outputs across N replicas.
+
+    The 04b output is in LONG format: each row is (Name, pose_id, residue_id,
+    vdw, es, total, ...). This consolidator groups by (Name, residue_id) and
+    aggregates the energy columns across replicas with mean / std / sem.
+
+    Outputs in output_dir:
+      - footprint_per_molecule.csv      mean +/- std per (Name, residue_id)
+      - molecule_footprint_summary.csv  mean +/- std per molecule (totals)
+      - residue_consensus.csv           recomputed across all replicas
+      - hit_vs_reference_comparison.csv mean +/- std per (Name, residue_id) of delta_*
+      - residue_mapping.csv             symlink to first replica's mapping
+      - pharmacophore_residues.json     symlink to first replica's JSON
+    """
+    from hit_validation.utils.replica_consolidation_helpers import (
+        compute_mean_std_sem, link_or_copy,
+    )
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not replica_dirs:
+        return {"success": False, "error": "No replica dirs provided"}
+
+    # 1. Symlink residue_mapping.csv (deterministic per receptor)
+    for rd in replica_dirs:
+        candidate = rd / "04b_footprint_analysis" / "residue_mapping.csv"
+        if candidate.exists():
+            link_or_copy(candidate, output_dir / "residue_mapping.csv")
+            break
+
+    # 2. Symlink pharmacophore_residues.json from first available replica
+    for rd in replica_dirs:
+        candidate = rd / "04b_footprint_analysis" / "pharmacophore_residues.json"
+        if candidate.exists():
+            link_or_copy(candidate, output_dir / "pharmacophore_residues.json")
+            break
+
+    # 3. Consolidate footprint_per_molecule.csv (LONG format)
+    fpm_dfs: List[pd.DataFrame] = []
+    for rd in replica_dirs:
+        fpm = rd / "04b_footprint_analysis" / "footprint_per_molecule.csv"
+        if fpm.exists():
+            fpm_dfs.append(pd.read_csv(fpm))
+
+    n_molecules = 0
+    n_residues = 0
+    if fpm_dfs:
+        long_concat = pd.concat(fpm_dfs, ignore_index=True)
+        # Keys: (Name, residue_id). Aggregate numeric energy columns.
+        agg_cols = [c for c in
+                    ["vdw", "es", "total", "ref_vdw", "ref_es", "ref_total",
+                     "delta_vdw", "delta_es", "delta_total", "fps_score",
+                     "hb_pose", "hb_ref"]
+                    if c in long_concat.columns]
+        # Pass-through (deterministic per residue): residue_name, residue_number, chain
+        passthrough = [c for c in ["residue_name", "residue_number", "chain"]
+                       if c in long_concat.columns]
+
+        agg_dict: Dict[str, Any] = {}
+        for c in agg_cols:
+            agg_dict[c] = list  # collect all values
+        for c in passthrough:
+            agg_dict[c] = "first"
+
+        grouped = long_concat.groupby(["Name", "residue_id"], as_index=False).agg(agg_dict)
+
+        # Expand list aggregates to mean/std/sem
+        rows = []
+        for _, g in grouped.iterrows():
+            row = {"Name": g["Name"], "residue_id": g["residue_id"]}
+            for c in passthrough:
+                row[c] = g[c]
+            n_used = 0
+            for c in agg_cols:
+                vals = g[c] if isinstance(g[c], list) else [g[c]]
+                stats = compute_mean_std_sem(vals)
+                row[f"{c}_mean"] = stats["mean"]
+                row[f"{c}_std"] = stats["std"]
+                row[f"{c}_sem"] = stats["sem"]
+                if stats["n"] > n_used:
+                    n_used = stats["n"]
+            row["n_replicas_used"] = n_used
+            rows.append(row)
+        out_fpm = pd.DataFrame(rows)
+        out_fpm.to_csv(output_dir / "footprint_per_molecule.csv", index=False)
+        n_molecules = out_fpm["Name"].nunique()
+        n_residues = out_fpm["residue_id"].nunique()
+
+    # 4. Consolidate molecule_footprint_summary.csv (per-molecule totals)
+    summary_dfs: List[pd.DataFrame] = []
+    for rd in replica_dirs:
+        s = rd / "04b_footprint_analysis" / "molecule_footprint_summary.csv"
+        if s.exists():
+            summary_dfs.append(pd.read_csv(s))
+
+    if summary_dfs:
+        long_summary = pd.concat(summary_dfs, ignore_index=True)
+        numeric_cols = [c for c in long_summary.columns
+                        if c not in ("Name", "pose_id")
+                        and pd.api.types.is_numeric_dtype(long_summary[c])]
+        rows = []
+        for mol, g in long_summary.groupby("Name"):
+            row: Dict[str, Any] = {"Name": mol}
+            n_used = 0
+            for c in numeric_cols:
+                stats = compute_mean_std_sem(g[c].tolist())
+                row[f"{c}_mean"] = stats["mean"]
+                row[f"{c}_std"] = stats["std"]
+                row[f"{c}_sem"] = stats["sem"]
+                if stats["n"] > n_used:
+                    n_used = stats["n"]
+            row["n_replicas_used"] = n_used
+            rows.append(row)
+        pd.DataFrame(rows).to_csv(
+            output_dir / "molecule_footprint_summary.csv", index=False
+        )
+
+    # 5. Recompute residue_consensus.csv across all replicas
+    # Use the same logic as the original module: per residue_id, fraction of
+    # molecules contributing across the union of all replica observations.
+    if fpm_dfs:
+        long_concat = pd.concat(fpm_dfs, ignore_index=True)
+        contributing_threshold = -0.5  # kcal/mol (same as original module)
+        rows = []
+        for residue_id, g in long_concat.groupby("residue_id"):
+            n_pres = g["Name"].nunique()
+            contributing = g[g["total"] < contributing_threshold]["Name"].nunique()
+            total_unique_mols = long_concat["Name"].nunique()
+            row = {
+                "residue_id": residue_id,
+                "residue_name": g["residue_name"].iloc[0] if "residue_name" in g else "",
+                "residue_number": g["residue_number"].iloc[0] if "residue_number" in g else "",
+                "chain": g["chain"].iloc[0] if "chain" in g else "",
+                "n_molecules_present": n_pres,
+                "n_molecules_contributing": contributing,
+                "frac_present": n_pres / total_unique_mols if total_unique_mols else 0.0,
+                "frac_contributing": contributing / total_unique_mols if total_unique_mols else 0.0,
+                "mean_vdw": float(g["vdw"].mean()) if "vdw" in g else float("nan"),
+                "mean_es": float(g["es"].mean()) if "es" in g else float("nan"),
+                "mean_total": float(g["total"].mean()) if "total" in g else float("nan"),
+                "std_total": float(g["total"].std(ddof=1)) if "total" in g and len(g) > 1 else 0.0,
+                "min_total": float(g["total"].min()) if "total" in g else float("nan"),
+                "max_total": float(g["total"].max()) if "total" in g else float("nan"),
+            }
+            rows.append(row)
+        pd.DataFrame(rows).to_csv(output_dir / "residue_consensus.csv", index=False)
+
+    # 6. Consolidate hit_vs_reference_comparison.csv (delta_* per (Name, residue_id))
+    hvr_dfs: List[pd.DataFrame] = []
+    for rd in replica_dirs:
+        h = rd / "04b_footprint_analysis" / "hit_vs_reference_comparison.csv"
+        if h.exists():
+            hvr_dfs.append(pd.read_csv(h))
+
+    if hvr_dfs:
+        long_hvr = pd.concat(hvr_dfs, ignore_index=True)
+        numeric_cols = [c for c in long_hvr.columns
+                        if c not in ("Name", "residue_id")
+                        and pd.api.types.is_numeric_dtype(long_hvr[c])]
+        rows = []
+        for (name, rid), g in long_hvr.groupby(["Name", "residue_id"]):
+            row: Dict[str, Any] = {"Name": name, "residue_id": rid}
+            n_used = 0
+            for c in numeric_cols:
+                stats = compute_mean_std_sem(g[c].tolist())
+                row[f"{c}_mean"] = stats["mean"]
+                row[f"{c}_std"] = stats["std"]
+                row[f"{c}_sem"] = stats["sem"]
+                if stats["n"] > n_used:
+                    n_used = stats["n"]
+            row["n_replicas_used"] = n_used
+            rows.append(row)
+        pd.DataFrame(rows).to_csv(
+            output_dir / "hit_vs_reference_comparison.csv", index=False
+        )
+
+    return {
+        "success": True,
+        "n_molecules": int(n_molecules),
+        "n_residues": int(n_residues),
+        "n_replicas": len(replica_dirs),
         "output_dir": str(output_dir),
     }

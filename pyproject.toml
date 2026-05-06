@@ -64,4 +64,7 @@ where = ["01_src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not slow'"
+markers = [
+    "slow: end-to-end / synthetic-campaign tests that build a fake replica tree on disk",
+]

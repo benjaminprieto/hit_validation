@@ -16,14 +16,21 @@ parameters:
   # Ligand residue name in AMBER topology (tleap assigns "UNL" by default)
   lig_resname: "UNL"
 
-  # Number of protein residues (for cpptraj mask :1-N)
-  n_protein_res: 706
+  # Number of protein residues (for cpptraj mask :1-N).
+  # null = auto-detect from residue_mapping (preferred) or complex.prmtop (fallback).
+  # Set explicitly only to override auto-detection.
+  n_protein_res: null
 
   # cpptraj timeout per molecule (seconds)
   cpptraj_timeout: 600
 
   # Solvated trajectory timeout (water bridges — much larger topology)
   cpptraj_solvated_timeout: 3600
+
+  # Water bridge analysis stride. Reduces frames passed to cpptraj.
+  # stride=10 means use 1 of every 10 frames (5000 → 500 frames typical).
+  # stride=1 = every frame (slow on large solvated systems).
+  water_bridge_stride: 10
 
   # Run ProLIF fingerprint analysis (requires prolif + MDAnalysis)
   run_prolif: true

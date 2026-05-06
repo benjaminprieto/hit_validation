@@ -29,7 +29,7 @@ grids:
   generate: true
   binding_site:
     method: "reference_ligand"          # DEFAULT: usa ligando de referencia para generar esferas + box
-    reference_mol2: "reference/SD1.mol2"  # Mol2 del ligando de referencia (coordenadas cristalográficas)
+    reference_mol2: "reference/UDX.mol2"  # Mol2 del ligando de referencia (coordenadas cristalográficas)
     # Alternativa: method: "residues" con lista de residuos (no recomendado)
     # residues: ["TRP392", "TRP495", "TYR565", "SER575", "HIS335",
     #            "ASP361", "ARG363", "GLU529", "ARG598", "LYS599"]
@@ -103,3 +103,18 @@ functional_residues:
   TRP392:
     function: "Substrate selectivity"
     evidence: "Excludes non-substrate sugars (Briggs & Hohenester 2018)"
+
+# Number of independent replicas for UQ
+n_replicas: 1
+
+# =============================================================================
+# MMPBSA / MM-GBSA DECOMPOSITION (module 01g)
+# =============================================================================
+# Triage strategy:
+#   - First pass on many molecules: mmgbsa=true, mmpbsa=false (~1.5h/mol)
+#   - Second pass on top hits:      mmgbsa=true, mmpbsa=true  (~10-12h/mol)
+# Module 07 only consumes GB metrics, so GB-only is fully compatible.
+mmpbsa_decomp:
+  mmgbsa: true       # MM-GBSA (Generalized Born) — fast
+  mmpbsa: true       # MM-PBSA (Poisson-Boltzmann) — rigorous, ~6-8x slower
+  timeout: 259200    # MMPBSA.py subprocess timeout (seconds). 72h.

@@ -40,6 +40,8 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import pandas as pd
 
+from hit_validation.m07_decision_report._footprint_loader import load_footprint_csv
+
 logger = logging.getLogger(__name__)
 
 
@@ -285,6 +287,8 @@ def generate_decision_html(
         ref_scores: Optional[Dict[str, float]] = None,
         reference_label: str = "Reference",
         zones: Optional[Dict[str, Dict]] = None,
+        replica_aware: bool = False,
+        n_replicas: int = 1,
 ) -> str:
     """Generate a one-page-per-molecule HTML decision report."""
     ref_scores = ref_scores or {}
@@ -302,6 +306,11 @@ h3{{color:#34495e;margin-top:20px}}
 .strong{{border-left:5px solid #27ae60}}
 .purchase{{border-left:5px solid #f39c12}}
 .weak{{border-left:5px solid #95a5a6}}
+.discordant{{border-left:5px solid #e74c3c}}
+.rec-discordant{{background:#f8d7da;color:#721c24}}
+.badge-replica{{display:inline-block;padding:3px 8px;border-radius:10px;font-size:11px;font-weight:bold;margin-left:6px}}
+.badge-consistent{{background:#d4edda;color:#155724}}
+.badge-discordant{{background:#f8d7da;color:#721c24}}
 table{{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}}
 th{{background:#f8f9fa;padding:8px;text-align:left;border-bottom:2px solid #dee2e6}}
 td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
@@ -318,8 +327,12 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
 </style></head><body>
 
 <h1>Hit Validation Decision Report</h1>
-<p class="meta">Campaign: {campaign_id} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Molecules: {len(molecules)}</p>
+<p class="meta">Campaign: {campaign_id} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} | Molecules: {len(molecules)}{f' | Replicas: {n_replicas}' if replica_aware else ''}</p>
 """
+    if replica_aware:
+        html += ('<p class="meta">Mode: <b>replica-aware</b>. Scores are reported '
+                 'as mean &plusmn; std across replicas. Pose-consistency verdict '
+                 'is produced by 07c (integrated analysis), not here.</p>')
 
     # Summary table
     html += """<h2>Summary Ranking</h2>
@@ -356,12 +369,26 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
     for mol in molecules:
         name = mol["name"]
         rec = mol.get("recommendation", "Weak candidate")
-        card_class = "strong" if "Strong" in rec else ("purchase" if "Purchase" in rec else "weak")
-        rec_class = "rec-strong" if "Strong" in rec else ("rec-purchase" if "Purchase" in rec else "rec-weak")
+        if "Discordant" in rec:
+            card_class = "discordant"
+            rec_class = "rec-discordant"
+        elif "Strong" in rec:
+            card_class = "strong"
+            rec_class = "rec-strong"
+        elif "Purchase" in rec:
+            card_class = "purchase"
+            rec_class = "rec-purchase"
+        else:
+            card_class = "weak"
+            rec_class = "rec-weak"
+
+        # Pose-consistency badge (consistent/discordant) is determined by 07c
+        # in Fase D and is not rendered here.
+        replica_badge = ""
 
         html += f"""
 <div class="mol-card {card_class}">
-<h3>{name}</h3>
+<h3>{name}{replica_badge}</h3>
 <div class="rec {rec_class}">{rec}</div>
 <p class="meta">{mol.get('reasoning', '')}</p>
 """
@@ -387,9 +414,12 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
             html += "</table>"
 
         # Scoring Summary
+        replica_stats = mol.get("replica_stats", {}) if replica_aware else {}
         html += """<h4>Scoring Summary</h4>
 <table>
 <tr><th>Score</th><th>Hit Value</th>"""
+        if replica_aware:
+            html += "<th>Std</th>"
         if ref_scores:
             html += f"<th>{reference_label}</th><th>Delta</th>"
         html += "</tr>"
@@ -399,6 +429,12 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
             html += f"""<tr>
 <td>{score_key}</td>
 <td class="mono">{hit_val:.2f}</td>"""
+            if replica_aware:
+                std_key = f"{score_key}_std"
+                if std_key in replica_stats:
+                    html += f'<td class="mono">&plusmn;{replica_stats[std_key]:.2f}</td>'
+                else:
+                    html += '<td class="mono">&mdash;</td>'
             if ref_scores:
                 ref_val = ref_scores.get(score_key, 0)
                 delta = hit_val - ref_val
@@ -412,6 +448,12 @@ td{{padding:6px 8px;border-bottom:1px solid #f0f0f0}}
             html += f"""<tr style="border-top:2px solid #dee2e6">
 <td><b>MMPBSA dG</b></td>
 <td class="mono"><b>{mmpbsa_dg:.2f}</b></td>"""
+            if replica_aware:
+                std = replica_stats.get("delta_total_std")
+                if std is not None:
+                    html += f'<td class="mono"><b>&plusmn;{std:.2f}</b></td>'
+                else:
+                    html += '<td class="mono">&mdash;</td>'
             if ref_scores:
                 html += '<td class="mono">&mdash;</td><td class="mono">&mdash;</td>'
             html += "</tr>"
@@ -489,15 +531,20 @@ def run_decision_report(
         docking_dir: Optional[str] = None,
         all_poses_csv: Optional[str] = None,
         pose_selection_weights: Optional[Dict[str, float]] = None,
+        replica_metadata_dir: Optional[Union[str, Path]] = None,
+        n_replicas: int = 1,
+        score_std_threshold: float = 5.0,
+        unified_verdict_csv: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """
     Generate decision report with multi-criteria pose selection.
 
     Args:
-        scores_csv: Path to 01e dock6_scores.csv
+        scores_csv: Path to 01e dock6_scores.csv. When n_replicas > 1, this
+                    must point to the consolidated CSV (has _mean/_std/_sem cols).
         output_dir: Output directory
-        plip_dir: Path to 03a_plip_analysis/
-        footprint_dir: Path to 04b_footprint_analysis/
+        plip_dir: Path to 03a_plip_analysis/ (or its consolidated/ when N>1).
+        footprint_dir: Path to 04b_footprint_analysis/ (or consolidated/).
         reference_scores_path: Path to reference scores CSV (optional)
         reference_plip_path: Path to reference PLIP JSON (optional)
         reference_footprint_path: Path to reference footprint CSV (optional)
@@ -510,6 +557,13 @@ def run_decision_report(
         docking_dir: Path to 01c_dock6_run/ (for mol2 extraction)
         all_poses_csv: Path to dock6_all_poses.csv (for multi-pose selection)
         pose_selection_weights: Weights for composite pose scoring
+        replica_metadata_dir: Path to <campaign>/_replica_metadata/. When set,
+                              representative_per_mol.csv is read for display.
+                              The actual mean/std data already lives inside
+                              the consolidated scores_csv and mmpbsa CSV.
+        n_replicas: Number of replicas (default 1 = legacy mode).
+        score_std_threshold: Grid_Score std threshold (kept for future Fase D
+                              discordant-verdict logic; currently informational).
 
     Returns:
         Dict with success, output paths
@@ -519,8 +573,19 @@ def run_decision_report(
 
     active_zones = zones or ZONE_DEFINITIONS
 
+    replica_aware = n_replicas > 1 and replica_metadata_dir is not None
+    representative_df = None
+    if replica_aware:
+        rep_path = Path(replica_metadata_dir) / "representative_per_mol.csv"
+        if rep_path.exists():
+            representative_df = pd.read_csv(rep_path)
+        else:
+            logger.warning(f"  representative_per_mol.csv not found at {rep_path}")
+            replica_aware = False
+
     logger.info("=" * 60)
-    logger.info("  07a Decision Report v2.0")
+    logger.info("  07a Decision Report v2.0"
+                + (f" (replica-aware, N={n_replicas})" if replica_aware else ""))
     logger.info("=" * 60)
 
     # --- Load hit scores ---
@@ -529,6 +594,25 @@ def run_decision_report(
 
     df_scores = pd.read_csv(scores_csv)
     logger.info(f"  Loaded {len(df_scores)} molecules from scores CSV")
+
+    # --- Load unified verdict from 07c (single source of truth) ---
+    unified_verdicts: Dict[str, Dict[str, Any]] = {}
+    if unified_verdict_csv and Path(unified_verdict_csv).exists():
+        try:
+            df_uv = pd.read_csv(unified_verdict_csv)
+            for _, row in df_uv.iterrows():
+                name = row.get("Name")
+                if pd.isna(name):
+                    continue
+                unified_verdicts[str(name)] = {
+                    k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()
+                }
+            logger.info(
+                f"  Loaded unified verdicts for {len(unified_verdicts)} molecules "
+                f"from {unified_verdict_csv}"
+            )
+        except Exception as e:
+            logger.warning(f"  Could not load unified_verdict.csv: {e}")
 
     # --- Load all poses for multi-criteria selection ---
     df_all_poses = None
@@ -563,13 +647,27 @@ def run_decision_report(
             try:
                 df_mmpbsa = pd.read_csv(consolidated_csv)
                 for _, row in df_mmpbsa.iterrows():
-                    mmpbsa_data[row["Name"]] = {
-                        "dG_total": row.get("MMPBSA_dG_total"),
-                        "vdW": row.get("MMPBSA_vdW"),
-                        "EEL": row.get("MMPBSA_EEL"),
-                        "EGB": row.get("MMPBSA_EGB"),
-                        "ESURF": row.get("MMPBSA_ESURF"),
+                    # In replica mode, _mean columns are present; in legacy
+                    # mode, raw columns are present. Prefer _mean when available.
+                    def _val(col):
+                        mc = f"{col}_mean"
+                        if mc in row and pd.notna(row[mc]):
+                            return row[mc]
+                        return row.get(col)
+                    entry = {
+                        "dG_total": _val("MMPBSA_dG_total"),
+                        "vdW": _val("MMPBSA_vdW"),
+                        "EEL": _val("MMPBSA_EEL"),
+                        "EGB": _val("MMPBSA_EGB"),
+                        "ESURF": _val("MMPBSA_ESURF"),
                     }
+                    # Capture mean/std/sem for HTML/CSV in replica mode
+                    for col in ("MMPBSA_dG_total", "delta_total"):
+                        for suffix in ("_mean", "_std", "_sem"):
+                            key = f"{col}{suffix}"
+                            if key in row and pd.notna(row[key]):
+                                entry[key] = float(row[key])
+                    mmpbsa_data[row["Name"]] = entry
                 logger.info(f"  Loaded MMPBSA data for {len(mmpbsa_data)} molecules")
             except Exception as e:
                 logger.warning(f"  Could not load MMPBSA data: {e}")
@@ -594,7 +692,7 @@ def run_decision_report(
     if footprint_dir:
         fp_csv = Path(footprint_dir) / "footprint_per_molecule.csv"
         if fp_csv.exists():
-            hit_footprint = pd.read_csv(fp_csv)
+            hit_footprint = load_footprint_csv(fp_csv)
 
     # --- Pose selection + mol2 export setup ---
     selected_poses_dir = output_dir / "selected_poses"
@@ -675,6 +773,33 @@ def run_decision_report(
         mol_mmpbsa = mmpbsa_data.get(name, {})
         mmpbsa_dg = mol_mmpbsa.get("dG_total")
 
+        # --- Replica-aware overrides ---
+        # In replica mode the consolidated dock6_scores.csv has Grid_Score_mean/std/sem
+        # columns (no plain "Grid_Score"); copy mean into Grid_Score for downstream
+        # logic and capture mean/std/sem stats for HTML/CSV display.
+        replica_stats: Dict[str, Any] = {}
+        if replica_aware:
+            score_row = df_scores[df_scores["Name"] == name]
+            if not score_row.empty:
+                sr = score_row.iloc[0]
+                if "Grid_Score_mean" in sr and pd.notna(sr["Grid_Score_mean"]):
+                    scores["Grid_Score"] = float(sr["Grid_Score_mean"])
+                for col in ("Grid_Score_mean", "Grid_Score_std", "Grid_Score_sem",
+                            "Grid_vdw_energy_mean", "Grid_vdw_energy_std",
+                            "Grid_es_energy_mean", "Grid_es_energy_std",
+                            "GBSA_Score_mean", "GBSA_Score_std", "GBSA_Score_sem",
+                            "Hawkins_GBSA_Score_mean", "Hawkins_GBSA_Score_std"):
+                    if col in sr and pd.notna(sr[col]):
+                        replica_stats[col] = float(sr[col])
+            # MMPBSA mean/std came from consolidated_mmpbsa.csv (loaded above).
+            for col in ("MMPBSA_dG_total_mean", "MMPBSA_dG_total_std",
+                        "MMPBSA_dG_total_sem", "delta_total_mean",
+                        "delta_total_std", "delta_total_sem"):
+                if col in mol_mmpbsa:
+                    replica_stats[col] = float(mol_mmpbsa[col])
+            # Pose consistency verdict / inter-replica RMSD live in 07c (Fase D).
+            # Not computed in 07a anymore.
+
         # Classify
         decision = classify_molecule(
             scores=scores,
@@ -686,8 +811,8 @@ def run_decision_report(
             zones=active_zones,
         )
 
-        # Enhance classification with MMPBSA if available
-        if mmpbsa_dg is not None:
+        # Enhance classification with MMPBSA if available (skipped if 07c verdict will override below)
+        if mmpbsa_dg is not None and name not in unified_verdicts:
             n_zones = decision["n_zones_covered"]
             grid_score = scores.get("Grid_Score", 0)
             if mmpbsa_dg <= mmpbsa_dg_strong_threshold and n_zones >= min_zones_for_template:
@@ -704,6 +829,20 @@ def run_decision_report(
                         f"AND Grid Score {grid_score:.1f} <= {grid_score_purchase_threshold}"
                     )
 
+        # Discordant verdict logic moved to 07c (Fase D). 07a stays informational
+        # in replica mode: mean +/- std are displayed but no purchase/discordant
+        # verdict is forced based on inter-replica consistency. score_std_threshold
+        # is still received as a parameter for forward-compat but unused here.
+
+        # If 07c emitted a unified verdict, prefer that as the recommendation.
+        uv = unified_verdicts.get(name)
+        if uv:
+            decision["recommendation"] = uv.get("verdict") or decision["recommendation"]
+            decision["reasoning"] = uv.get("reasons") or decision["reasoning"]
+            decision["unified_category"] = uv.get("category")
+            decision["pose_max_rmsd_inter_replica"] = uv.get("pose_max_rmsd_inter_replica")
+            decision["sign_change"] = uv.get("sign_change")
+
         molecules.append({
             "name": name,
             "scores": scores,
@@ -718,6 +857,7 @@ def run_decision_report(
             "n_plip_interactions": len(plip_interactions),
             "mmpbsa_dg": mmpbsa_dg,
             "mmpbsa_data": mol_mmpbsa,
+            "replica_stats": replica_stats,
             **decision,
         })
 
@@ -732,12 +872,22 @@ def run_decision_report(
         })
 
     # Sort by recommendation strength then grid score
-    rec_order = {"Strong Pharmit template candidate": 0, "Purchase candidate": 1, "Weak candidate": 2}
-    molecules.sort(key=lambda m: (rec_order.get(m["recommendation"], 3), m["grid_score"]))
+    def _rec_rank(rec: str) -> int:
+        if "Discordant" in rec:
+            return 4
+        if "Strong" in rec:
+            return 0
+        if "Purchase" in rec:
+            return 1
+        if "Weak" in rec:
+            return 2
+        return 3
+    molecules.sort(key=lambda m: (_rec_rank(m["recommendation"]), m["grid_score"]))
 
     # --- Generate HTML report ---
     html = generate_decision_html(
         molecules, campaign_id, ref_scores, reference_label, active_zones,
+        replica_aware=replica_aware, n_replicas=n_replicas,
     )
     html_path = output_dir / "decision_report.html"
     html_path.write_text(html, encoding="utf-8")
@@ -753,7 +903,7 @@ def run_decision_report(
     # --- Generate summary CSV ---
     summary_rows = []
     for i, mol in enumerate(molecules, 1):
-        summary_rows.append({
+        row = {
             "Rank": i,
             "Name": mol["name"],
             "Grid_Score": mol["grid_score"],
@@ -765,7 +915,25 @@ def run_decision_report(
             "Zones_List": ",".join(mol["zones_covered"]),
             "N_PLIP_Interactions": mol["n_plip_interactions"],
             "Reasoning": mol["reasoning"],
-        })
+        }
+        if replica_aware:
+            stats = mol.get("replica_stats", {})
+            row["Grid_Score_Std"] = stats.get("Grid_Score_std")
+            # delta_total_std mirrors MMPBSA_dG_total_std (alias from 01h consolidator).
+            row["MMPBSA_dG_Std"] = stats.get(
+                "delta_total_std", stats.get("MMPBSA_dG_total_std")
+            )
+            # Pose RMSD inter-replica + Pose_Consistency from 07c unified verdict.
+            pose_rmsd = mol.get("pose_max_rmsd_inter_replica")
+            row["Pose_Max_RMSD"] = (
+                float(pose_rmsd) if pose_rmsd is not None else None
+            )
+            cat = mol.get("unified_category")
+            row["Pose_Consistency"] = (
+                "Discordant" if cat == "discordant" else
+                ("OK" if cat is not None else None)
+            )
+        summary_rows.append(row)
 
     df_summary = pd.DataFrame(summary_rows)
     summary_csv = output_dir / "decision_summary.csv"
@@ -773,9 +941,13 @@ def run_decision_report(
     logger.info(f"  Saved: {summary_csv}")
 
     # --- Log summary ---
-    n_strong = sum(1 for m in molecules if "Strong" in m["recommendation"])
-    n_purchase = sum(1 for m in molecules if "Purchase" in m["recommendation"])
-    n_weak = sum(1 for m in molecules if "Weak" in m["recommendation"])
+    n_discordant = sum(1 for m in molecules if "Discordant" in m["recommendation"])
+    n_strong = sum(1 for m in molecules
+                   if "Strong" in m["recommendation"] and "Discordant" not in m["recommendation"])
+    n_purchase = sum(1 for m in molecules
+                     if "Purchase" in m["recommendation"] and "Discordant" not in m["recommendation"])
+    n_weak = sum(1 for m in molecules
+                 if "Weak" in m["recommendation"] and "Discordant" not in m["recommendation"])
 
     logger.info("")
     logger.info(f"{'=' * 60}")
@@ -783,6 +955,8 @@ def run_decision_report(
     logger.info(f"    Strong template: {n_strong}")
     logger.info(f"    Purchase:        {n_purchase}")
     logger.info(f"    Weak:            {n_weak}")
+    if replica_aware:
+        logger.info(f"    Discordant:      {n_discordant}")
     logger.info(f"  Selected poses exported to: {selected_poses_dir}")
     logger.info(f"{'=' * 60}")
 
@@ -792,6 +966,7 @@ def run_decision_report(
         "n_strong": n_strong,
         "n_purchase": n_purchase,
         "n_weak": n_weak,
+        "n_discordant": n_discordant,
         "html_path": str(html_path),
         "summary_csv": str(summary_csv),
         "selected_poses_dir": str(selected_poses_dir),

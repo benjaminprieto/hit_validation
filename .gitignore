@@ -1,7 +1,19 @@
-# Results (generated per-campaigns)
+# =============================================================================
+# Pipeline outputs (generated per-campaign, can be 10s of GB)
+# =============================================================================
 05_results/
 
-# Python
+# =============================================================================
+# Logs and stdout captures
+# =============================================================================
+logs/
+*.log
+nohup.out
+!check_dependencies.sh
+
+# =============================================================================
+# Python build artifacts
+# =============================================================================
 __pycache__/
 *.pyc
 *.pyo
@@ -9,19 +21,30 @@ __pycache__/
 dist/
 build/
 *.egg
+.pytest_cache/
+.coverage
+.tox/
+.mypy_cache/
+.ruff_cache/
 
-# IDE
+# =============================================================================
+# Editor / IDE
+# =============================================================================
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
+# =============================================================================
 # OS
+# =============================================================================
 .DS_Store
 Thumbs.db
 
-# DOCK6 temp files
+# =============================================================================
+# DOCK6 temporary files
+# =============================================================================
 OUTSPH
 temp*
 *.dms
@@ -30,10 +53,46 @@ temp*
 grid.nrg
 grid.bmp
 
-# Logs (keep in 05_results, not in project root)
-*.log
-!check_dependencies.sh
-
-# Antechamber temp files
+# =============================================================================
+# AmberTools / antechamber temporary files
+# =============================================================================
 ANTECHAMBER_*
 ATOMTYPE.INF
+sqm.in
+sqm.out
+sqm.pdb
+leap.log
+mdinfo
+mdvel
+mdfrc
+
+# =============================================================================
+# MD / topology / per-frame artifacts (defense-in-depth: these live inside
+# 05_results/ which is already ignored, but prevent accidental tracking if
+# anyone runs scripts at the project root).
+# =============================================================================
+*.dcd
+*.mdcrd
+*.prmtop
+*.inpcrd
+*.rst7
+*.parm7
+*.nc
+_MMPBSA_*
+
+# =============================================================================
+# Local backups (manual or scripted before refactors)
+# =============================================================================
+*_backup_*/
+*.original
+
+# =============================================================================
+# Secrets / local environment overrides (defense in depth)
+# =============================================================================
+.env
+.env.local
+*.key
+*.pem
+*.secret
+# Backup files
+*.bak

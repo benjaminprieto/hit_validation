@@ -4,7 +4,7 @@
 # Residue-by-residue comparison of hits vs crystallographic reference.
 # Shows WHERE each hit wins or loses vs UDX — the "why" behind 07a decisions.
 #
-# INPUT:  05_results/{campaign}/04_dock6_analysis/04b_footprint_analysis/footprint_per_molecule.csv
+# INPUT:  05_results/{campaign}/04b_footprint_analysis/footprint_per_molecule.csv
 # OUTPUT: 05_results/{campaign}/07b_residue_comparison/
 #
 # Project: hit_validation

@@ -27,6 +27,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | 
 sys.path.insert(0, str(Path(__file__).parent.parent / "01_src"))
 
 from hit_validation.m07_decision_report.integrated_analysis import run_integrated_analysis
+from hit_validation.utils.paths import resolve_footprint_analysis_dir
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,9 @@ def main():
     parser.add_argument("--output", "-o", type=str, default=None)
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--n-replicas", type=int, default=1,
+                        help="Number of replicas. When >1, footprint/MMPBSA/PLIP/MD are read "
+                             "from <module>/consolidated/ when available.")
     args = parser.parse_args()
 
     # =========================================================================
@@ -72,8 +76,36 @@ def main():
     output_dir = Path(args.output) if args.output else results_base / output_subdir
 
     # Required inputs
-    footprint_csv = results_base / "04_dock6_analysis" / "04b_footprint_analysis" / "footprint_per_molecule.csv"
-    mmpbsa_global_csv = results_base / "01h_mmpbsa_analysis" / "consolidated_mmpbsa.csv"
+    n_replicas = max(1, int(args.n_replicas))
+    if n_replicas > 1:
+        consolidated_fp = results_base / "04b_footprint_analysis" / "consolidated"
+        consolidated_mmp = results_base / "01h_mmpbsa_analysis" / "consolidated"
+        footprint_dir = (consolidated_fp if consolidated_fp.exists()
+                         else resolve_footprint_analysis_dir(results_base))
+        footprint_csv = footprint_dir / "footprint_per_molecule.csv"
+        mmpbsa_global_csv = (consolidated_mmp / "consolidated_mmpbsa.csv"
+                             if consolidated_mmp.exists()
+                             else results_base / "01h_mmpbsa_analysis" / "consolidated_mmpbsa.csv")
+    else:
+        footprint_dir = resolve_footprint_analysis_dir(results_base)
+        footprint_csv = footprint_dir / "footprint_per_molecule.csv"
+        mmpbsa_global_csv = results_base / "01h_mmpbsa_analysis" / "consolidated_mmpbsa.csv"
+
+    # Inputs for unified verdict
+    if n_replicas > 1:
+        dock6_scores_csv = results_base / "01e_score_collection" / "consolidated" / "dock6_scores.csv"
+        if not dock6_scores_csv.exists():
+            dock6_scores_csv = results_base / "01e_score_collection" / "dock6_scores.csv"
+        rmsd_summary_csv = results_base / "01i_trajectory_analysis" / "consolidated" / "rmsd_summary.csv"
+    else:
+        dock6_scores_csv = results_base / "01e_score_collection" / "dock6_scores.csv"
+        rmsd_summary_csv = None
+    subpocket_coverage_csv = footprint_dir / "subpocket_coverage.csv"
+
+    dock6_scores_csv = str(dock6_scores_csv) if dock6_scores_csv and Path(dock6_scores_csv).exists() else None
+    rmsd_summary_csv = str(rmsd_summary_csv) if rmsd_summary_csv and Path(rmsd_summary_csv).exists() else None
+    subpocket_coverage_csv = str(subpocket_coverage_csv) if subpocket_coverage_csv.exists() else None
+    shared_base = results_base if n_replicas > 1 else None
 
     if not footprint_csv.exists():
         logger.error(f"Required: {footprint_csv}")
@@ -82,17 +114,29 @@ def main():
         logger.error(f"Required: {mmpbsa_global_csv}")
         return 1
 
-    # Optional inputs (directories)
-    mmpbsa_decomp_dir = results_base / "01h_mmpbsa_analysis"
-    plip_dir = results_base / "03a_plip_analysis"
-    md_dir = results_base / "01i_trajectory_analysis"
+    # Optional inputs (directories) — prefer consolidated/ when N>1
+    if n_replicas > 1:
+        mmpbsa_decomp_dir = results_base / "01h_mmpbsa_analysis" / "consolidated"
+        plip_dir = results_base / "03a_plip_analysis" / "consolidated"
+        md_dir = results_base / "01i_trajectory_analysis" / "consolidated"
+        # Fallback: legacy locations if consolidated/ missing
+        if not mmpbsa_decomp_dir.exists():
+            mmpbsa_decomp_dir = results_base / "01h_mmpbsa_analysis"
+        if not plip_dir.exists():
+            plip_dir = results_base / "03a_plip_analysis"
+        if not md_dir.exists():
+            md_dir = results_base / "01i_trajectory_analysis"
+    else:
+        mmpbsa_decomp_dir = results_base / "01h_mmpbsa_analysis"
+        plip_dir = results_base / "03a_plip_analysis"
+        md_dir = results_base / "01i_trajectory_analysis"
 
     mmpbsa_decomp_dir = str(mmpbsa_decomp_dir) if mmpbsa_decomp_dir.exists() else None
     plip_dir = str(plip_dir) if plip_dir.exists() else None
     md_dir = str(md_dir) if md_dir.exists() else None
 
     # Residue mapping for H-bond/water bridge matching (PDB <-> sequential)
-    residue_mapping_csv = results_base / "04_dock6_analysis" / "04b_footprint_analysis" / "residue_mapping.csv"
+    residue_mapping_csv = footprint_dir / "residue_mapping.csv"
     residue_mapping_csv = str(residue_mapping_csv) if residue_mapping_csv.exists() else None
 
     # =========================================================================
@@ -135,6 +179,12 @@ def main():
         weak_threshold=params.get("mmpbsa_weak_threshold", -15.0),
         unstable_threshold=params.get("rmsd_unstable_threshold", 4.0),
         mobile_threshold=params.get("rmsd_mobile_threshold", 2.0),
+        n_replicas=n_replicas,
+        shared_base=str(shared_base) if shared_base else None,
+        dock6_scores_csv=dock6_scores_csv,
+        subpocket_coverage_csv=subpocket_coverage_csv,
+        rmsd_summary_csv=rmsd_summary_csv,
+        unified_thresholds=params.get("unified_thresholds"),
     )
 
     if not result.get("success"):

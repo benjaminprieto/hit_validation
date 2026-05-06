@@ -101,3 +101,17 @@ functional_residues:
   TRP392:
     function: "Substrate selectivity"
     evidence: "Excludes non-substrate sugars (Briggs & Hohenester 2018)"
+# Number of independent replicas for UQ
+n_replicas: 1
+
+# =============================================================================
+# MMPBSA / MM-GBSA DECOMPOSITION (module 01g)
+# =============================================================================
+# Triage strategy:
+#   - First pass on many molecules: mmgbsa=true, mmpbsa=false (~1.5h/mol)
+#   - Second pass on top hits:      mmgbsa=true, mmpbsa=true  (~10-12h/mol)
+# Module 07 only consumes GB metrics, so GB-only is fully compatible.
+mmpbsa_decomp:
+  mmgbsa: true       # MM-GBSA (Generalized Born) — fast
+  mmpbsa: true       # MM-PBSA (Poisson-Boltzmann) — rigorous, ~6-8x slower
+  timeout: 259200    # MMPBSA.py subprocess timeout (seconds). 72h.

@@ -1,4 +1,6 @@
 """Tests for hit_validation pipeline."""
+from datetime import date
+
 import pytest
 
 
@@ -181,6 +183,25 @@ class TestPlipAnalysis:
         assert callable(run_plip_batch_analysis)
 
 
+class TestTrajectoryAnalysis:
+    def test_detect_n_protein_residues_callable(self):
+        from hit_validation.m01_docking.trajectory_analysis import detect_n_protein_residues
+        assert callable(detect_n_protein_residues)
+
+    def test_detect_n_protein_residues_missing_prmtop(self, tmp_path):
+        """Returns None on detection failure (missing file)."""
+        from hit_validation.m01_docking.trajectory_analysis import detect_n_protein_residues
+        assert detect_n_protein_residues(tmp_path / "does_not_exist.prmtop") is None
+
+    def test_run_accepts_optional_n_protein_res(self):
+        """run_trajectory_analysis signature has Optional[int] n_protein_res defaulting to None."""
+        import inspect
+        from hit_validation.m01_docking.trajectory_analysis import run_trajectory_analysis
+        sig = inspect.signature(run_trajectory_analysis)
+        assert "n_protein_res" in sig.parameters
+        assert sig.parameters["n_protein_res"].default is None
+
+
 class TestFootprintAnalysis:
     def test_import(self):
         from hit_validation.m04_dock6_analysis.footprint_analysis import run_footprint_analysis
@@ -323,3 +344,88 @@ GASTEIGER
         """KEY_RESIDUES should not exist as a module-level constant."""
         import hit_validation.m07_decision_report.decision_report as dr
         assert not hasattr(dr, "KEY_RESIDUES")
+
+
+class TestPathHelpers:
+    def test_resolve_footprint_dir_prefers_new(self, tmp_path):
+        """When new path exists, helper returns it without warning."""
+        from hit_validation.utils.paths import resolve_footprint_analysis_dir
+        new_dir = tmp_path / "04b_footprint_analysis"
+        new_dir.mkdir()
+        assert resolve_footprint_analysis_dir(tmp_path) == new_dir
+
+    def test_resolve_footprint_dir_falls_back_to_legacy(self, tmp_path, caplog):
+        """When only legacy path exists, helper returns it and emits a deprecation warning."""
+        import logging
+        from hit_validation.utils.paths import resolve_footprint_analysis_dir
+        legacy = tmp_path / "04_dock6_analysis" / "04b_footprint_analysis"
+        legacy.mkdir(parents=True)
+        with caplog.at_level(logging.WARNING):
+            result = resolve_footprint_analysis_dir(tmp_path)
+        assert result == legacy
+        assert any("DEPRECATED" in r.message for r in caplog.records)
+
+    def test_resolve_footprint_dir_returns_new_when_neither_exists(self, tmp_path):
+        """When neither path exists, returns new path (caller handles missing input)."""
+        from hit_validation.utils.paths import resolve_footprint_analysis_dir
+        assert resolve_footprint_analysis_dir(tmp_path) == tmp_path / "04b_footprint_analysis"
+
+    def test_legacy_fallback_deadline_not_passed(self):
+        """
+        Self-enforcing reminder: this test fails after the legacy fallback removal date.
+
+        When this test fails:
+          1. Remove `legacy_path` branch from utils/paths.py::resolve_footprint_analysis_dir
+          2. Remove `test_resolve_footprint_dir_falls_back_to_legacy` (above)
+          3. Update or remove this test
+        """
+        from datetime import datetime
+        from hit_validation.utils.paths import FOOTPRINT_LEGACY_REMOVAL_DATE
+        deadline = datetime.strptime(FOOTPRINT_LEGACY_REMOVAL_DATE, "%Y-%m-%d").date()
+        today = date.today()
+        assert today <= deadline, (
+            f"Legacy fallback deadline ({deadline}) has passed. "
+            f"Remove fallback from utils/paths.py and update this test."
+        )
+
+
+class TestMigratePathsScript:
+    def test_find_legacy_dirs_empty(self, tmp_path):
+        """No legacy dirs in an empty results directory."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "02_scripts" / "utils"))
+        from migrate_paths import find_legacy_dirs
+        assert find_legacy_dirs(tmp_path) == []
+
+    def test_find_legacy_dirs_top_level(self, tmp_path):
+        """Detects legacy dir at top level (n_replicas=1 mode)."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "02_scripts" / "utils"))
+        from migrate_paths import find_legacy_dirs
+        legacy = tmp_path / "04_dock6_analysis" / "04b_footprint_analysis"
+        legacy.mkdir(parents=True)
+        assert find_legacy_dirs(tmp_path) == [legacy]
+
+    def test_find_legacy_dirs_with_replicas(self, tmp_path):
+        """Detects legacy dirs across multiple replicas."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "02_scripts" / "utils"))
+        from migrate_paths import find_legacy_dirs
+        for r in (1, 2, 3):
+            (tmp_path / f"replica_{r}" / "04_dock6_analysis" / "04b_footprint_analysis").mkdir(parents=True)
+        assert len(find_legacy_dirs(tmp_path)) == 3
+
+    def test_migrate_one_skips_when_dest_exists(self, tmp_path):
+        """Refuses to overwrite existing destination."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "02_scripts" / "utils"))
+        from migrate_paths import migrate_one
+        legacy = tmp_path / "04_dock6_analysis" / "04b_footprint_analysis"
+        legacy.mkdir(parents=True)
+        (tmp_path / "04b_footprint_analysis").mkdir()
+        assert migrate_one(legacy, dry_run=False) is False
+        assert legacy.exists()  # not moved

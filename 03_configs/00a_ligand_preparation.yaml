@@ -4,17 +4,18 @@
 # Prepares screening hit ligands for DOCK6 validation docking.
 # Uses antechamber with AM1-BCC charges + Sybyl atom types.
 #
-# 3-tier fallback:
-#   Tier 1: antechamber -c bcc -at sybyl  (AM1-BCC + Sybyl)
-#   Tier 2: antechamber -c gas -at sybyl  (Gasteiger + Sybyl, fast)
-#   Tier 3: obabel conversion             (last resort)
+# 3-tier strategy with explicit warnings on degradation:
+#   Tier 1: clean-slate openbabel protonation (pybel API)
+#         + antechamber -c bcc -at sybyl -nc <formal_charge>
+#   Tier 2: antechamber -c gas -at sybyl  (Gasteiger fallback, degraded)
+#   Tier 3: obabel conversion             (last resort, degraded)
 #
 # INPUT:  campaign_dir/ligands/ (mol2 or SDF files)
 # OUTPUT: 05_results/{campaign}/00a_ligand_preparation/{name}/{name}.mol2
 #
 # Project: hit_validation
 # Module: 00a
-# Version: 1.0 (2026-03-27)
+# Version: 1.1 (clean-slate + explicit -nc + degraded_charges flag)
 # =============================================================================
 
 parameters:
@@ -25,12 +26,15 @@ parameters:
   # Charge method: "bcc" (AM1-BCC, gold standard) or "gas" (Gasteiger, fast)
   charge_method: "bcc"
 
-  # Timeout per molecule in seconds (AM1-BCC QM can be slow for large molecules)
-  timeout_per_molecule: 1200
+  # Timeout per molecule in seconds.
+  # Increased from 1200 to 1800: covers AM1-BCC SCF for molecules up to ~80 heavy
+  # atoms with multiple formal charges (e.g., dicationic 76-atom case took 45min).
+  timeout_per_molecule: 1800
 
   # Protonation tool for ligands before antechamber.
-  # "obabel"   -> OpenBabel -p pH (same as molecular_docking, recommended)
-  # "ionization" -> ionization package / Dimorphite-DL (generates charged species that crash sqm)
+  # Only "obabel" is supported (clean-slate via pybel API). Other values emit
+  # a warning and fall back to obabel. The ionprofile package is for batch
+  # auditing, not runtime.
   protonation_tool: "obabel"
 
   log_level: "INFO"

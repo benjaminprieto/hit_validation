@@ -61,6 +61,8 @@ def main():
                         help="Run simplex minimization before GB/SA scoring")
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--replica-id", type=int, default=None,
+                        help="Replica ID (1-indexed). None=legacy non-replicated mode.")
     args = parser.parse_args()
 
     cc = load_yaml(args.campaigns)
@@ -69,11 +71,18 @@ def main():
     mc = load_yaml(args.config)
     params = mc.get("parameters", {})
 
-    docking_dir = str(Path("05_results") / campaign_id / "01c_dock6_run")
-    output_dir = args.output or str(Path("05_results") / campaign_id / "01f_gbsa_rescore")
+    # --- Path resolution ---
+    shared_base = Path("05_results") / campaign_id
+    results_base = shared_base
+    if args.replica_id is not None:
+        results_base = shared_base / f"replica_{args.replica_id}"
 
-    # Receptor mol2
-    rec_mol2_path = Path("05_results") / campaign_id / "00b_receptor_preparation" / "rec_charged.mol2"
+    # 01c is REPLICATED, receptor is SHARED
+    docking_dir = str(results_base / "01c_dock6_run")
+    output_dir = args.output or str(results_base / "01f_gbsa_rescore")
+
+    # Receptor mol2 (SHARED)
+    rec_mol2_path = shared_base / "00b_receptor_preparation" / "rec_charged.mol2"
     if not rec_mol2_path.exists():
         logger.error(f"Receptor mol2 not found: {rec_mol2_path}")
         return 1

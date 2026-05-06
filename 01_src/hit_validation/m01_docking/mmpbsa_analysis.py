@@ -611,6 +611,211 @@ MMPBSA.py 14.0 | idecomp=1 (per-residue) | igb=2 (OBC-II) | saltcon=0.15 M | AMB
 
 
 # =============================================================================
+# PER-FRAME PARSING (added v2.0, 2026-04-27)
+# =============================================================================
+
+def parse_sander_mdout(mdout_path: Union[str, Path]) -> List[Dict[str, float]]:
+    """
+    Parse sander mdout file (_MMPBSA_*.mdout.0) and extract energy components per frame.
+
+    Each MMPBSA frame produces one sander minimization block with FINAL RESULTS.
+
+    Returns:
+        List of dicts, one per frame, with keys:
+        BOND, ANGLE, DIHED, VDWAALS, EEL, EGB or EPB, ESURF or ECAVITY,
+        '1-4 VDW', '1-4 EEL', RESTRAINT, total_energy
+    """
+    text = Path(mdout_path).read_text()
+    frames = []
+
+    # Cada frame empieza con "NSTEP       ENERGY..."
+    blocks = re.split(r"^\s*NSTEP\s+ENERGY", text, flags=re.MULTILINE)
+    if len(blocks) < 2:
+        return []
+
+    for block in blocks[1:]:
+        frame_data = {}
+
+        patterns = {
+            'BOND': r'BOND\s*=\s*([-\d.E+]+)',
+            'ANGLE': r'ANGLE\s*=\s*([-\d.E+]+)',
+            'DIHED': r'DIHED\s*=\s*([-\d.E+]+)',
+            'VDWAALS': r'VDWAALS\s*=\s*([-\d.E+]+)',
+            'EEL': r'\bEEL\s*=\s*([-\d.E+]+)',
+            'EGB': r'EGB\s*=\s*([-\d.E+]+)',
+            'EPB': r'EPB\s*=\s*([-\d.E+]+)',
+            'ESURF': r'ESURF\s*=\s*([-\d.E+]+)',
+            'ECAVITY': r'ECAVITY\s*=\s*([-\d.E+]+)',
+            'EDISPER': r'EDISPER\s*=\s*([-\d.E+]+)',
+            '1-4 VDW': r'1-4\s+VDW\s*=\s*([-\d.E+]+)',
+            '1-4 EEL': r'1-4\s+EEL\s*=\s*([-\d.E+]+)',
+            'RESTRAINT': r'RESTRAINT\s*=\s*([-\d.E+]+)',
+        }
+
+        for key, pat in patterns.items():
+            m = re.search(pat, block)
+            if m:
+                try:
+                    frame_data[key] = float(m.group(1))
+                except ValueError:
+                    pass
+
+        m_total = re.search(r"minimization completed,\s*ENE\s*=\s*([-\d.E+]+)", block)
+        if m_total:
+            try:
+                frame_data['total_energy'] = float(m_total.group(1))
+            except ValueError:
+                pass
+
+        if frame_data:
+            frames.append(frame_data)
+
+    return frames
+
+
+def compute_dG_per_frame(
+        mmpbsa_dir: Union[str, Path],
+        method: str = "gb",
+) -> Optional[List[Dict[str, float]]]:
+    """
+    Compute ΔG per frame from sander mdout files.
+
+    Args:
+        mmpbsa_dir: Path containing _MMPBSA_*.mdout.0 files
+        method: "gb" or "pb"
+
+    Returns:
+        List of dicts per frame with keys: frame, dG, vdW, EEL, solv, surf.
+        Or None if files not found.
+    """
+    mmpbsa_dir = Path(mmpbsa_dir)
+
+    complex_file = mmpbsa_dir / f"_MMPBSA_complex_{method}.mdout.0"
+    receptor_file = mmpbsa_dir / f"_MMPBSA_receptor_{method}.mdout.0"
+    ligand_file = mmpbsa_dir / f"_MMPBSA_ligand_{method}.mdout.0"
+
+    if not all(f.exists() for f in [complex_file, receptor_file, ligand_file]):
+        return None
+
+    complex_frames = parse_sander_mdout(complex_file)
+    receptor_frames = parse_sander_mdout(receptor_file)
+    ligand_frames = parse_sander_mdout(ligand_file)
+
+    if not (len(complex_frames) == len(receptor_frames) == len(ligand_frames)):
+        logger.warning(
+            f"Frame count mismatch in {mmpbsa_dir}: "
+            f"complex={len(complex_frames)}, receptor={len(receptor_frames)}, "
+            f"ligand={len(ligand_frames)}"
+        )
+        n = min(len(complex_frames), len(receptor_frames), len(ligand_frames))
+        complex_frames = complex_frames[:n]
+        receptor_frames = receptor_frames[:n]
+        ligand_frames = ligand_frames[:n]
+
+    solv_key = "EGB" if method == "gb" else "EPB"
+
+    def _get_nonpolar(frame_data):
+        if method == "gb":
+            return frame_data.get('ESURF', 0)
+        else:
+            ecavity = frame_data.get('ECAVITY', 0)
+            edisper = frame_data.get('EDISPER', 0)
+            if ecavity != 0 or edisper != 0:
+                return ecavity + edisper
+            else:
+                return frame_data.get('ESURF', 0)
+
+    results = []
+    for i, (c, r, l) in enumerate(zip(complex_frames, receptor_frames, ligand_frames), 1):
+        c_vdw = c.get('VDWAALS', 0) + c.get('1-4 VDW', 0)
+        c_eel = c.get('EEL', 0) + c.get('1-4 EEL', 0)
+        c_solv = c.get(solv_key, 0)
+        c_surf = _get_nonpolar(c)
+        c_total = c_vdw + c_eel + c_solv + c_surf
+
+        r_vdw = r.get('VDWAALS', 0) + r.get('1-4 VDW', 0)
+        r_eel = r.get('EEL', 0) + r.get('1-4 EEL', 0)
+        r_solv = r.get(solv_key, 0)
+        r_surf = _get_nonpolar(r)
+        r_total = r_vdw + r_eel + r_solv + r_surf
+
+        l_vdw = l.get('VDWAALS', 0) + l.get('1-4 VDW', 0)
+        l_eel = l.get('EEL', 0) + l.get('1-4 EEL', 0)
+        l_solv = l.get(solv_key, 0)
+        l_surf = _get_nonpolar(l)
+        l_total = l_vdw + l_eel + l_solv + l_surf
+
+        results.append({
+            'frame': i,
+            'dG': c_total - r_total - l_total,
+            'vdW': c_vdw - r_vdw - l_vdw,
+            'EEL': c_eel - r_eel - l_eel,
+            'solv': c_solv - r_solv - l_solv,
+            'surf': c_surf - r_surf - l_surf,
+        })
+
+    return results
+
+
+def export_dG_per_frame_csv(
+        mmpbsa_dir: Union[str, Path],
+        output_csv: Union[str, Path],
+        time_per_frame_ns: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Export combined GB+PB per-frame ΔG to a single CSV.
+
+    Output columns:
+        frame, time_ns,
+        dG_GB, vdW_GB, EEL_GB, EGB, ESURF,
+        dG_PB, vdW_PB, EEL_PB, EPB, nonpolar_PB
+    """
+    gb_data = compute_dG_per_frame(mmpbsa_dir, method="gb")
+    pb_data = compute_dG_per_frame(mmpbsa_dir, method="pb")
+
+    if gb_data is None and pb_data is None:
+        return {"success": False, "error": "No GB or PB mdout files found"}
+
+    if gb_data and pb_data:
+        n_frames = min(len(gb_data), len(pb_data))
+    elif gb_data:
+        n_frames = len(gb_data)
+    else:
+        n_frames = len(pb_data)
+
+    rows = []
+    for i in range(n_frames):
+        row = {
+            'frame': i + 1,
+            'time_ns': (i + 1) * time_per_frame_ns,
+        }
+        if gb_data and i < len(gb_data):
+            row['dG_GB'] = gb_data[i]['dG']
+            row['vdW_GB'] = gb_data[i]['vdW']
+            row['EEL_GB'] = gb_data[i]['EEL']
+            row['EGB'] = gb_data[i]['solv']
+            row['ESURF'] = gb_data[i]['surf']
+        if pb_data and i < len(pb_data):
+            row['dG_PB'] = pb_data[i]['dG']
+            row['vdW_PB'] = pb_data[i]['vdW']
+            row['EEL_PB'] = pb_data[i]['EEL']
+            row['EPB'] = pb_data[i]['solv']
+            row['nonpolar_PB'] = pb_data[i]['surf']
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df.to_csv(output_csv, index=False)
+
+    return {
+        "success": True,
+        "n_frames": n_frames,
+        "has_gb": gb_data is not None,
+        "has_pb": pb_data is not None,
+        "output_csv": str(output_csv),
+    }
+
+
+# =============================================================================
 # SINGLE-MOLECULE ANALYSIS PIPELINE
 # =============================================================================
 
@@ -728,6 +933,26 @@ def run_mmpbsa_analysis(
     except Exception as e:
         logger.warning(f"  HTML generation failed: {e}")
 
+    # ─── Step 10: Per-frame ΔG export ───
+    pf_summary = None
+    mmpbsa_files_dir = Path(decomp_file).parent
+    pf_csv_name = f"{molecule_name}_dG_per_frame.csv" if molecule_name else "dG_per_frame.csv"
+    dG_per_frame_csv = output_dir / pf_csv_name
+    if mmpbsa_files_dir.exists():
+        pf_result = export_dG_per_frame_csv(
+            mmpbsa_dir=mmpbsa_files_dir,
+            output_csv=dG_per_frame_csv,
+            time_per_frame_ns=1.0,
+        )
+        if pf_result.get("success"):
+            logger.info(
+                f"  ΔG per-frame exported: {pf_result['n_frames']} frames "
+                f"(GB={pf_result['has_gb']}, PB={pf_result['has_pb']})"
+            )
+            pf_summary = pf_result
+        else:
+            logger.warning(f"  ΔG per-frame extraction failed: {pf_result.get('error')}")
+
     logger.info("")
     logger.info("=" * 60)
     logger.info(f"  MMPBSA Analysis Complete")
@@ -747,6 +972,7 @@ def run_mmpbsa_analysis(
         "n_residues": result_parse["n_residues"],
         "n_favorable": result_parse["n_favorable"],
         "n_unfavorable": result_parse["n_unfavorable"],
+        "dG_per_frame": pf_summary,
     }
 
 
@@ -969,4 +1195,199 @@ def run_mmpbsa_batch_analysis(
         "consolidated_csv": str(consolidated_csv) if consolidated_csv else None,
         "zone_comparison_csv": str(zone_comparison_csv) if zone_comparison_csv else None,
         "html_report": str(html_path) if html_path else None,
+    }
+
+
+# =============================================================================
+# REPLICA CONSOLIDATION
+# =============================================================================
+
+def consolidate_mmpbsa_analysis_replicas(
+    replica_dirs: List[Path],
+    output_dir: Path,
+) -> Dict:
+    """
+    Consolidate MMPBSA outputs across N replicas.
+
+    Outputs in output_dir:
+      - consolidated_mmpbsa.csv: per molecule, mean +/- std +/- sem for
+            MMPBSA_dG_total, MMPBSA_vdW, MMPBSA_EEL, MMPBSA_EGB, MMPBSA_ESURF.
+            Also writes delta_total_* aliases (compatibility with consumers).
+      - per_residue_decomp.csv: per (molecule, residue), mean +/- std for
+            internal, vdw, es, gb, sa, total.
+
+    Per-replica 01h layout:
+      - <replica>/01h_mmpbsa_analysis/consolidated_mmpbsa.csv  (top-level)
+      - <replica>/01h_mmpbsa_analysis/<molecule>/per_residue_decomp.csv
+    """
+    from hit_validation.utils.replica_consolidation_helpers import compute_mean_std_sem
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Aggregate top-level consolidated_mmpbsa.csv
+    metric_cols = ["MMPBSA_dG_total", "MMPBSA_vdW", "MMPBSA_EEL", "MMPBSA_EGB", "MMPBSA_ESURF"]
+    per_mol: Dict[str, Dict[str, list]] = {}
+    for rd in replica_dirs:
+        csv = rd / "01h_mmpbsa_analysis" / "consolidated_mmpbsa.csv"
+        if not csv.exists():
+            logger.warning(f"Missing 01h consolidated_mmpbsa.csv in {rd.name}")
+            continue
+        df = pd.read_csv(csv)
+        for _, row in df.iterrows():
+            mol = row.get("Name")
+            if pd.isna(mol):
+                continue
+            entry = per_mol.setdefault(mol, {c: [] for c in metric_cols})
+            for c in metric_cols:
+                if c in row and pd.notna(row[c]):
+                    entry[c].append(float(row[c]))
+
+    rows = []
+    for mol in sorted(per_mol.keys()):
+        row: Dict[str, Any] = {"Name": mol}
+        n_used = 0
+        for c in metric_cols:
+            stats = compute_mean_std_sem(per_mol[mol][c])
+            row[f"{c}_mean"] = stats["mean"]
+            row[f"{c}_std"] = stats["std"]
+            row[f"{c}_sem"] = stats["sem"]
+            if stats["n"] > n_used:
+                n_used = stats["n"]
+        # Compatibility alias for select_representative_replicas and 07a
+        row["delta_total_mean"] = row.get("MMPBSA_dG_total_mean", float("nan"))
+        row["delta_total_std"] = row.get("MMPBSA_dG_total_std", float("nan"))
+        row["delta_total_sem"] = row.get("MMPBSA_dG_total_sem", float("nan"))
+        row["n_replicas_used"] = n_used
+        rows.append(row)
+
+    out_csv = output_dir / "consolidated_mmpbsa.csv"
+    pd.DataFrame(rows).to_csv(out_csv, index=False)
+    logger.info(f"01h consolidation: wrote {len(rows)} molecules to {out_csv}")
+
+    # 2. Aggregate per-residue decomposition (one row per (mol, residue))
+    decomp_cols = ["internal", "vdw", "es", "gb", "sa", "total"]
+    decomp_data: Dict[tuple, Dict[str, list]] = {}
+    decomp_passthrough: Dict[tuple, Dict[str, Any]] = {}
+
+    for rd in replica_dirs:
+        h_dir = rd / "01h_mmpbsa_analysis"
+        if not h_dir.exists():
+            continue
+        for mol_dir in h_dir.iterdir():
+            if not mol_dir.is_dir():
+                continue
+            decomp_csv = mol_dir / "per_residue_decomp.csv"
+            if not decomp_csv.exists():
+                continue
+            try:
+                df = pd.read_csv(decomp_csv)
+            except Exception as e:
+                logger.warning(f"Failed to parse {decomp_csv}: {e}")
+                continue
+            mol = mol_dir.name
+            if "residue_id" not in df.columns:
+                continue
+            for _, r in df.iterrows():
+                key = (mol, r["residue_id"])
+                entry = decomp_data.setdefault(key, {c: [] for c in decomp_cols})
+                for c in decomp_cols:
+                    if c in r and pd.notna(r[c]):
+                        entry[c].append(float(r[c]))
+                pt = decomp_passthrough.setdefault(key, {})
+                for c in ("residue_name", "residue_number_pdb", "residue_name_pdb",
+                          "residue_number_seq", "chain"):
+                    if c in r and pd.notna(r[c]) and c not in pt:
+                        pt[c] = r[c]
+
+    decomp_rows = []
+    for (mol, res_id), vals in decomp_data.items():
+        row: Dict[str, Any] = {"Name": mol, "residue_id": res_id}
+        row.update(decomp_passthrough.get((mol, res_id), {}))
+        n_used = 0
+        for c in decomp_cols:
+            stats = compute_mean_std_sem(vals[c])
+            row[f"{c}_mean"] = stats["mean"]
+            row[f"{c}_std"] = stats["std"]
+            row[f"{c}_sem"] = stats["sem"]
+            if stats["n"] > n_used:
+                n_used = stats["n"]
+        row["n_replicas_used"] = n_used
+        decomp_rows.append(row)
+
+    if decomp_rows:
+        decomp_df = pd.DataFrame(decomp_rows)
+        decomp_out = output_dir / "per_residue_decomp.csv"
+        decomp_df.to_csv(decomp_out, index=False)
+        logger.info(
+            f"01h decomp consolidation: {decomp_df['Name'].nunique()} molecules x "
+            f"{decomp_df['residue_id'].nunique()} residues -> {decomp_out}"
+        )
+
+    return {
+        "success": True,
+        "n_molecules": len(rows),
+        "output_dir": str(output_dir),
+    }
+
+
+# =============================================================================
+# PER-FRAME REPLICA CONSOLIDATION (added v2.0, 2026-04-27)
+# =============================================================================
+
+def consolidate_dG_per_frame_replicas(
+        campaign_results_base: Union[str, Path],
+        molecule_name: str,
+        n_replicas: int,
+        output_csv: Union[str, Path],
+) -> Dict[str, Any]:
+    """
+    Consolidate dG_per_frame across N replicas.
+
+    For each frame index, compute mean ± std across replicas.
+
+    Output columns:
+        frame, time_ns,
+        dG_GB_mean, dG_GB_std, dG_PB_mean, dG_PB_std, ...
+    """
+    base = Path(campaign_results_base)
+
+    replica_dfs = []
+    for r in range(1, n_replicas + 1):
+        csv_path = base / f"replica_{r}" / "01h_mmpbsa_analysis" / f"{molecule_name}_dG_per_frame.csv"
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+            df["replica"] = r
+            replica_dfs.append(df)
+
+    if not replica_dfs:
+        return {"success": False, "error": "No replica per-frame CSVs found"}
+
+    combined = pd.concat(replica_dfs, ignore_index=True)
+
+    numeric_cols = [c for c in combined.columns if c not in ("frame", "time_ns", "replica")]
+
+    agg_dict = {col: ['mean', 'std'] for col in numeric_cols}
+    agg_dict['time_ns'] = 'first'
+
+    grouped = combined.groupby("frame").agg(agg_dict).reset_index()
+
+    new_cols = []
+    for col in grouped.columns:
+        if isinstance(col, tuple):
+            if col[1] == 'first':
+                new_cols.append(col[0])
+            else:
+                new_cols.append(f"{col[0]}_{col[1]}")
+        else:
+            new_cols.append(col)
+    grouped.columns = new_cols
+
+    grouped.to_csv(output_csv, index=False)
+
+    return {
+        "success": True,
+        "n_frames": len(grouped),
+        "n_replicas_found": len(replica_dfs),
+        "output_csv": str(output_csv),
     }

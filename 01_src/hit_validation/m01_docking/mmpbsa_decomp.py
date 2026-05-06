@@ -110,7 +110,7 @@ saveamberparm COM {solvated_prmtop} {solvated_inpcrd}
 quit
 """
 
-# MMPBSA.py input file
+# MMPBSA.py input file (default: GB + PB)
 MMPBSA_INPUT_TEMPLATE = """\
 &general
   startframe={startframe}, endframe={endframe}, interval={interval},
@@ -118,6 +118,41 @@ MMPBSA_INPUT_TEMPLATE = """\
 /
 &gb
   igb={igb}, saltcon={saltcon},
+/
+&pb
+  istrng={istrng}, fillratio={fillratio}, radiopt={radiopt},
+/
+&decomp
+  idecomp={idecomp},
+  dec_verbose=3,
+  print_res="all"
+/
+"""
+
+# GB-only variant (skip &pb — PB is what dominates runtime on large systems)
+MMPBSA_INPUT_TEMPLATE_GB_ONLY = """\
+&general
+  startframe={startframe}, endframe={endframe}, interval={interval},
+  verbose=2, keep_files=2,
+/
+&gb
+  igb={igb}, saltcon={saltcon},
+/
+&decomp
+  idecomp={idecomp},
+  dec_verbose=3,
+  print_res="all"
+/
+"""
+
+# PB-only variant (skip &gb — symmetric option, rarely used in practice)
+MMPBSA_INPUT_TEMPLATE_PB_ONLY = """\
+&general
+  startframe={startframe}, endframe={endframe}, interval={interval},
+  verbose=2, keep_files=2,
+/
+&pb
+  istrng={istrng}, fillratio={fillratio}, radiopt={radiopt},
 /
 &decomp
   idecomp={idecomp},
@@ -590,8 +625,16 @@ def build_topologies(
                 "error": f"tleap gas-phase failed. Missing: {missing}. {error_msg}",
                 "tleap_log": str(tleap_log)}
 
-    n_atoms_complex = _parse_tleap_atom_count(proc.stdout, "COM")
-    logger.info(f"  Gas-phase complex: {n_atoms_complex} atoms")
+    n_atoms_complex = _count_atoms_in_prmtop(gas_files["complex_prmtop"])
+    if n_atoms_complex > 0:
+        logger.info(f"  Gas-phase complex: {n_atoms_complex} atoms")
+    elif n_atoms_complex == 0:
+        logger.error(
+            f"  Gas-phase complex topology is EMPTY -- tleap may have failed "
+            f"(prmtop missing or <1KB)"
+        )
+    else:
+        logger.warning(f"  Gas-phase complex: atom count unavailable (parmed read failure)")
 
     result = {
         "success": True,
@@ -641,8 +684,16 @@ def build_topologies(
                     "error": f"tleap solvation failed: {error_msg}",
                     "tleap_log": str(tleap_solv_log)}
 
-        n_atoms_solvated = _parse_tleap_atom_count(proc_solv.stdout, "COM")
-        logger.info(f"  Solvated complex: {n_atoms_solvated} atoms")
+        n_atoms_solvated = _count_atoms_in_prmtop(solv_prmtop)
+        if n_atoms_solvated > 0:
+            logger.info(f"  Solvated complex: {n_atoms_solvated} atoms")
+        elif n_atoms_solvated == 0:
+            logger.error(
+                f"  Solvated complex topology is EMPTY -- tleap solvation failed "
+                f"(prmtop missing or <1KB)"
+            )
+        else:
+            logger.warning(f"  Solvated complex: atom count unavailable (parmed read failure)")
 
         result["solvated_prmtop"] = str(solv_prmtop)
         result["solvated_inpcrd"] = str(solv_inpcrd)
@@ -652,14 +703,25 @@ def build_topologies(
     return result
 
 
-def _parse_tleap_atom_count(log_text: str, unit_name: str = "COM") -> int:
-    """Parse atom count from tleap log output."""
-    for line in log_text.split("\n"):
-        if "atoms" in line.lower() and unit_name.lower() in line.lower():
-            match = re.search(r"(\d+)\s+atoms", line)
-            if match:
-                return int(match.group(1))
-    return 0
+def _count_atoms_in_prmtop(prmtop_path: Union[str, Path]) -> int:
+    """
+    Count atoms in a prmtop file using parmed.
+
+    Returns:
+        int: positive atom count on success
+        0:   prmtop loaded but is empty (real tleap failure)
+        -1:  could not read prmtop (counting failure, NOT an empty topology)
+    """
+    p = Path(prmtop_path)
+    if not p.exists() or p.stat().st_size < 1024:
+        return 0  # prmtop missing or trivially small -> tleap effectively failed
+    try:
+        import parmed as pmd
+        topo = pmd.load_file(str(p))
+        return len(topo.atoms)
+    except Exception as e:
+        logger.warning(f"  Could not count atoms in {p.name}: {e}")
+        return -1
 
 
 # =============================================================================
@@ -717,6 +779,7 @@ def run_md_openmm(
         unrestrained_steps: int = 5000,
         heating_ps: float = 100.0,
         equilibration_ps: float = 500.0,
+        random_seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Run explicit-solvent MD with OpenMM on GPU.
@@ -791,6 +854,9 @@ def run_md_openmm(
     integrator = openmm.LangevinMiddleIntegrator(
         temperature * unit.kelvin, 1.0 / unit.picosecond, dt * unit.picoseconds
     )
+    if random_seed is not None:
+        integrator.setRandomNumberSeed(int(random_seed))
+        logger.info(f"    Integrator seed: {int(random_seed)}")
 
     platform = openmm.Platform.getPlatformByName("CUDA")
     platform_properties = {"Precision": "mixed"}
@@ -953,24 +1019,53 @@ def run_mmpbsa(
         idecomp: int = 1,
         igb: int = 2,
         saltcon: float = 0.15,
+        istrng: float = 0.150,
+        fillratio: float = 4.0,
+        radiopt: int = 0,
         solvated_prmtop: Optional[Union[str, Path]] = None,
+        timeout: int = 86400,
+        run_gb: bool = True,
+        run_pb: bool = True,
 ) -> Dict[str, Any]:
     """
     Run MMPBSA.py with per-residue decomposition.
+
+    Args:
+        timeout: MMPBSA.py subprocess timeout in seconds (default 86400 = 24h).
+                 PB on a ~11k-atom receptor with 50 frames takes ~10-12h.
+                 GB-only (run_pb=False) takes ~1.5h on the same system.
+        run_gb:  If False, omit the &gb block (PB-only). Edge-case option.
+        run_pb:  If False, omit the &pb block — only GB is computed.
+                 ~6-8x faster on large systems; module 07 only consumes GB.
     """
+    if not (run_gb or run_pb):
+        return {"success": False,
+                "error": "At least one of run_gb or run_pb must be True"}
+
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     mmpbsa_in = output_dir / "mmpbsa.in"
     safe_endframe = n_frames if n_frames > 0 else 99999
-    mmpbsa_input = MMPBSA_INPUT_TEMPLATE.format(
+
+    if run_gb and run_pb:
+        template = MMPBSA_INPUT_TEMPLATE
+    elif run_gb:
+        template = MMPBSA_INPUT_TEMPLATE_GB_ONLY
+    else:
+        template = MMPBSA_INPUT_TEMPLATE_PB_ONLY
+
+    fmt_kwargs = dict(
         startframe=1,
         endframe=safe_endframe,
         interval=1,
-        igb=igb,
-        saltcon=saltcon,
         idecomp=idecomp,
     )
+    if run_gb:
+        fmt_kwargs.update(igb=igb, saltcon=saltcon)
+    if run_pb:
+        fmt_kwargs.update(istrng=istrng, fillratio=fillratio, radiopt=radiopt)
+    mmpbsa_input = template.format(**fmt_kwargs)
     mmpbsa_in.write_text(mmpbsa_input)
 
     cmd = [
@@ -988,14 +1083,23 @@ def run_mmpbsa(
         cmd.extend(["-sp", str(Path(solvated_prmtop).resolve())])
 
     logger.info("  MMPBSA.py: running per-residue decomposition")
-    logger.info(f"    idecomp={idecomp}, igb={igb}, saltcon={saltcon}")
+    logger.info(f"    idecomp={idecomp}")
+    if run_gb:
+        logger.info(f"    GB (mmgbsa=on): igb={igb}, saltcon={saltcon}")
+    else:
+        logger.info("    GB (mmgbsa=off): skipped")
+    if run_pb:
+        logger.info(f"    PB (mmpbsa=on): istrng={istrng}, fillratio={fillratio}, radiopt={radiopt}")
+    else:
+        logger.info("    PB (mmpbsa=off): skipped")
     logger.info(f"    Frames: {n_frames}")
+    logger.info(f"    Timeout: {timeout}s ({timeout / 3600:.1f}h)")
     logger.debug(f"    cmd: {' '.join(cmd)}")
 
     t0 = time.time()
     proc = subprocess.run(
         cmd, capture_output=True, text=True,
-        timeout=7200,
+        timeout=timeout,
         cwd=str(output_dir),
     )
     runtime = time.time() - t0
@@ -1047,6 +1151,12 @@ def run_mmpbsa_decomp(
         mmpbsa_idecomp: int = 1,
         mmpbsa_igb: int = 2,
         mmpbsa_saltcon: float = 0.15,
+        mmpbsa_istrng: float = 0.150,
+        mmpbsa_fillratio: float = 4.0,
+        mmpbsa_radiopt: int = 0,
+        mmpbsa_timeout: int = 86400,
+        mmpbsa_run_gb: bool = True,
+        mmpbsa_run_pb: bool = True,
         md_params: Optional[Dict] = None,
         antechamber_timeout: int = 300,
 ) -> Dict[str, Any]:
@@ -1172,6 +1282,7 @@ def run_mmpbsa_decomp(
             unrestrained_steps=min_params.get("unrestrained_steps", 5000),
             heating_ps=md_p.get("heating_ps", 100.0),
             equilibration_ps=md_p.get("equilibration_ps", 500.0),
+            random_seed=md_p.get("random_seed"),
         )
         if not result_md["success"]:
             return {"success": False, "error": f"MD: {result_md['error']}"}
@@ -1219,7 +1330,13 @@ def run_mmpbsa_decomp(
         idecomp=mmpbsa_idecomp,
         igb=mmpbsa_igb,
         saltcon=mmpbsa_saltcon,
+        istrng=mmpbsa_istrng,
+        fillratio=mmpbsa_fillratio,
+        radiopt=mmpbsa_radiopt,
         solvated_prmtop=solvated_prmtop,
+        timeout=mmpbsa_timeout,
+        run_gb=mmpbsa_run_gb,
+        run_pb=mmpbsa_run_pb,
     )
     if not result_mmpbsa["success"]:
         return {"success": False, "error": f"MMPBSA: {result_mmpbsa['error']}"}
@@ -1278,6 +1395,8 @@ def run_mmpbsa_batch(
         mode: str = "md",
         pose_selection: str = "best_score",
         molecules: Optional[List[str]] = None,
+        dock6_dir: Optional[Union[str, Path]] = None,
+        receptor_dir: Optional[Union[str, Path]] = None,
         **mmpbsa_params,
 ) -> Dict[str, Any]:
     """
@@ -1290,11 +1409,15 @@ def run_mmpbsa_batch(
 
     Args:
         campaign_dir:  Path to campaign directory
-        results_base:  Path to 05_results/{campaign_id}/
+        results_base:  Path to 05_results/{campaign_id}/ (or replica_N/ when replicated)
         output_dir:    Output directory for all MMPBSA results
         mode:          "single_point" or "md"
         pose_selection: "best_score" or "pose_index"
         molecules:     List of molecule names (None = all in 01c output)
+        dock6_dir:     Override for 01c output location.
+                       If None, defaults to results_base/01c_dock6_run (legacy).
+        receptor_dir:  Override for 00b output location.
+                       If None, defaults to results_base/00b_receptor_preparation (legacy).
         **mmpbsa_params: Passed through to run_mmpbsa_decomp
 
     Returns:
@@ -1304,8 +1427,12 @@ def run_mmpbsa_batch(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve dock6_dir: explicit override or legacy default
+    dock6_dir = Path(dock6_dir) if dock6_dir else results_base / "01c_dock6_run"
+    # Resolve receptor_dir: explicit override or legacy default
+    receptor_dir = Path(receptor_dir) if receptor_dir else results_base / "00b_receptor_preparation"
+
     # Discover molecules from 01c_dock6_run/ subdirectories
-    dock6_dir = results_base / "01c_dock6_run"
     if molecules is None:
         if not dock6_dir.exists():
             return {"success": False, "error": f"Docking dir not found: {dock6_dir}"}
@@ -1318,15 +1445,15 @@ def run_mmpbsa_batch(
         return {"success": False, "error": "No molecules found in 01c_dock6_run/"}
 
     # Receptor paths
-    rec_mol2 = results_base / "00b_receptor_preparation" / "rec_charged.mol2"
-    rec_pdb = results_base / "00b_receptor_preparation" / "receptor_protonated.pdb"
+    rec_mol2 = receptor_dir / "rec_charged.mol2"
+    rec_pdb = receptor_dir / "receptor_protonated.pdb"
     if not rec_pdb.exists():
-        rec_pdb = results_base / "00b_receptor_preparation" / "rec_noH.pdb"
+        rec_pdb = receptor_dir / "rec_noH.pdb"
 
     if not rec_mol2.exists():
         return {"success": False, "error": f"Receptor mol2 not found: {rec_mol2}"}
     if not rec_pdb.exists():
-        return {"success": False, "error": "Receptor PDB not found in 00b_receptor_preparation/"}
+        return {"success": False, "error": f"Receptor PDB not found in {receptor_dir}/"}
 
     logger.info("=" * 60)
     logger.info("  MMPBSA Batch Processing (01g)")

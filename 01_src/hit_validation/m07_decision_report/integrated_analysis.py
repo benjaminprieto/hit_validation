@@ -33,12 +33,22 @@ Version: 1.0
 
 import json
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+
+from hit_validation.m07_decision_report.utils.unified_verdict import (
+    classify_molecule_unified,
+    detect_sign_change,
+)
+from hit_validation.m07_decision_report.utils.pose_consistency import (
+    compute_pose_consistency_for_campaign,
+)
+from hit_validation.m07_decision_report._footprint_loader import load_footprint_csv
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 def load_footprint(footprint_csv: Union[str, Path]) -> pd.DataFrame:
     """Load 04b footprint_per_molecule.csv."""
-    return pd.read_csv(footprint_csv)
+    return load_footprint_csv(footprint_csv)
 
 
 def load_mmpbsa_global(consolidated_csv: Union[str, Path]) -> pd.DataFrame:
@@ -668,6 +678,140 @@ def generate_molecule_card(mol: Dict) -> str:
 # MAIN ORCHESTRATOR
 # =============================================================================
 
+def _load_zone_counts(
+        subpocket_coverage_csv: Optional[Union[str, Path]],
+        zone_strong_threshold: float = -2.0,
+) -> Dict[str, Dict[str, int]]:
+    """
+    Load 04b subpocket_coverage.csv and aggregate per molecule.
+
+    Returns:
+        {mol_name: {"zones_covered": int, "zone_strong_count": int}}
+        zones_covered counts rows with covered=True; zone_strong_count counts
+        rows with energy_total <= zone_strong_threshold (default -2.0 kcal/mol).
+    """
+    if not subpocket_coverage_csv:
+        return {}
+    path = Path(subpocket_coverage_csv)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        logger.warning(f"Failed to read {path}: {e}")
+        return {}
+    if "Name" not in df.columns:
+        return {}
+    out: Dict[str, Dict[str, int]] = {}
+    for mol, sub in df.groupby("Name"):
+        if "is_reference" in sub.columns:
+            sub = sub[sub["is_reference"] != True]
+        zones_covered = int(sub.get("covered", pd.Series(dtype=bool)).fillna(False).astype(bool).sum())
+        if "energy_total" in sub.columns:
+            zone_strong_count = int((sub["energy_total"] <= zone_strong_threshold).sum())
+        else:
+            zone_strong_count = 0
+        out[str(mol)] = {
+            "zones_covered": zones_covered,
+            "zone_strong_count": zone_strong_count,
+        }
+    return out
+
+
+def _load_dock6_scores(
+        dock6_scores_csv: Optional[Union[str, Path]],
+) -> Dict[str, Dict[str, float]]:
+    """
+    Load 01e dock6_scores.csv and return per-molecule Grid_Score stats.
+
+    Detects N>1 (Grid_Score_mean / _std) vs N=1 (Grid_Score) layouts.
+    """
+    if not dock6_scores_csv:
+        return {}
+    path = Path(dock6_scores_csv)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        logger.warning(f"Failed to read {path}: {e}")
+        return {}
+    if "Name" not in df.columns:
+        return {}
+    out: Dict[str, Dict[str, float]] = {}
+    has_mean = "Grid_Score_mean" in df.columns
+    for _, row in df.iterrows():
+        mol = row.get("Name")
+        if pd.isna(mol):
+            continue
+        entry: Dict[str, float] = {}
+        if has_mean:
+            entry["Grid_Score_mean"] = row.get("Grid_Score_mean")
+            entry["Grid_Score_std"] = row.get("Grid_Score_std")
+        elif "Grid_Score" in df.columns:
+            entry["Grid_Score"] = row.get("Grid_Score")
+        out[str(mol)] = entry
+    return out
+
+
+def _load_rmsd_summary(
+        rmsd_summary_csv: Optional[Union[str, Path]],
+) -> Dict[str, float]:
+    """Load 01i consolidated rmsd_summary.csv -> {mol: max_rmsd_across_replicas}."""
+    if not rmsd_summary_csv:
+        return {}
+    path = Path(rmsd_summary_csv)
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        logger.warning(f"Failed to read {path}: {e}")
+        return {}
+    if "Name" not in df.columns or "max_rmsd_across_replicas" not in df.columns:
+        return {}
+    return {
+        str(row["Name"]): float(row["max_rmsd_across_replicas"])
+        for _, row in df.iterrows()
+        if pd.notna(row.get("Name")) and pd.notna(row.get("max_rmsd_across_replicas"))
+    }
+
+
+def _load_replica_dGs(
+        shared_base: Optional[Path],
+        n_replicas: int,
+) -> Dict[str, List[Optional[float]]]:
+    """
+    Walk replica_*/01h_mmpbsa_analysis/consolidated_mmpbsa.csv to collect
+    per-replica MMPBSA_dG_total for each molecule. Used to detect sign-change.
+    """
+    if shared_base is None or n_replicas <= 1:
+        return {}
+    out: Dict[str, List[Optional[float]]] = {}
+    for n in range(1, n_replicas + 1):
+        csv = shared_base / f"replica_{n}" / "01h_mmpbsa_analysis" / "consolidated_mmpbsa.csv"
+        if not csv.exists():
+            continue
+        try:
+            df = pd.read_csv(csv)
+        except Exception as e:
+            logger.warning(f"Failed to read {csv}: {e}")
+            continue
+        col = "MMPBSA_dG_total" if "MMPBSA_dG_total" in df.columns else (
+            "MMPBSA_dG" if "MMPBSA_dG" in df.columns else None
+        )
+        if col is None:
+            continue
+        for _, row in df.iterrows():
+            mol = row.get("Name")
+            if pd.isna(mol):
+                continue
+            val = row.get(col)
+            entry = out.setdefault(str(mol), [])
+            entry.append(None if pd.isna(val) else float(val))
+    return out
+
+
 def run_integrated_analysis(
         campaign_id: str,
         footprint_csv: Union[str, Path],
@@ -683,6 +827,12 @@ def run_integrated_analysis(
         weak_threshold: float = -15.0,
         unstable_threshold: float = 4.0,
         mobile_threshold: float = 2.0,
+        n_replicas: int = 1,
+        shared_base: Optional[Union[str, Path]] = None,
+        dock6_scores_csv: Optional[Union[str, Path]] = None,
+        subpocket_coverage_csv: Optional[Union[str, Path]] = None,
+        rmsd_summary_csv: Optional[Union[str, Path]] = None,
+        unified_thresholds: Optional[Dict[str, float]] = None,
 ) -> Dict:
     """Run integrated analysis for all molecules in a campaign."""
     output_dir = Path(output_dir)
@@ -710,6 +860,35 @@ def run_integrated_analysis(
         logger.info(f"  Residue mapping: {len(pdb_to_seq)} residues (PDB->sequential)")
     else:
         logger.warning("  No residue mapping — H-bond/water bridge matching will be limited")
+
+    # ----- Unified-verdict precomputed inputs -----
+    zone_counts = _load_zone_counts(subpocket_coverage_csv)
+    grid_scores = _load_dock6_scores(dock6_scores_csv)
+    rmsd_summary = _load_rmsd_summary(rmsd_summary_csv)
+    replica_dGs = _load_replica_dGs(
+        Path(shared_base) if shared_base else None, n_replicas
+    )
+
+    # Pose consistency across replicas (only meaningful for N>1).
+    pose_rmsd_per_mol: Dict[str, float] = {}
+    if n_replicas > 1 and shared_base is not None:
+        try:
+            df_pose = compute_pose_consistency_for_campaign(
+                Path(shared_base), n_replicas,
+                output_csv=output_dir / "pose_consistency.csv",
+            )
+            if not df_pose.empty:
+                for _, row in df_pose.iterrows():
+                    pose_rmsd_per_mol[str(row["Name"])] = float(
+                        row["pose_max_rmsd_inter_replica"]
+                    )
+                logger.info(
+                    f"  Pose consistency: {len(pose_rmsd_per_mol)} molecules"
+                )
+        except Exception as e:
+            logger.warning(f"Pose consistency computation failed: {e}")
+
+    verdict_rows: List[Dict[str, Any]] = []
 
     all_molecules = []
     summary_rows = []
@@ -805,6 +984,83 @@ def run_integrated_analysis(
             "N_desolvation_traps": n_traps,
         })
 
+        # ----- Unified verdict (single source of truth) -----
+        mol_mmp_row = df_mmpbsa_global[df_mmpbsa_global["Name"] == mol_name]
+        mol_mmp = mol_mmp_row.iloc[0] if not mol_mmp_row.empty else None
+
+        zc = zone_counts.get(mol_name, {})
+        zones_covered = zc.get("zones_covered", 0)
+        zone_strong_count = zc.get("zone_strong_count", 0)
+        gs = grid_scores.get(mol_name, {})
+        max_rmsd_val = rmsd_summary.get(mol_name)
+        pose_rmsd_inter = pose_rmsd_per_mol.get(mol_name, 0.0)
+        sign_change = detect_sign_change(replica_dGs.get(mol_name, []))
+
+        if n_replicas > 1:
+            def _f(name):
+                if mol_mmp is None:
+                    return None
+                v = mol_mmp.get(name)
+                return None if (v is None or (isinstance(v, float) and math.isnan(v))) else float(v)
+            scores_dict = {
+                "dG_mean": _f("MMPBSA_dG_total_mean") if mol_mmp is not None and "MMPBSA_dG_total_mean" in mol_mmp.index else _f("delta_total_mean"),
+                "dG_std":  _f("MMPBSA_dG_total_std")  if mol_mmp is not None and "MMPBSA_dG_total_std"  in mol_mmp.index else _f("delta_total_std"),
+                "dG_sem":  _f("MMPBSA_dG_total_sem")  if mol_mmp is not None and "MMPBSA_dG_total_sem"  in mol_mmp.index else _f("delta_total_sem"),
+                "Grid_Score_mean": gs.get("Grid_Score_mean"),
+                "Grid_Score_std": gs.get("Grid_Score_std"),
+                "zones_covered": zones_covered,
+                "zone_strong_count": zone_strong_count,
+                "max_rmsd_across_replicas": max_rmsd_val,
+            }
+            consistency_dict = {
+                "pose_max_rmsd_inter_replica": pose_rmsd_inter,
+                "sign_change": sign_change,
+            }
+        else:
+            dG_n1 = None
+            if mol_mmp is not None:
+                dG_n1 = mol_mmp.get("MMPBSA_dG_total")
+                if dG_n1 is None or (isinstance(dG_n1, float) and math.isnan(dG_n1)):
+                    dG_n1 = mol_mmp.get("MMPBSA_dG")
+                if dG_n1 is not None and not (isinstance(dG_n1, float) and math.isnan(dG_n1)):
+                    dG_n1 = float(dG_n1)
+                else:
+                    dG_n1 = None
+            scores_dict = {
+                "dG": dG_n1,
+                "Grid_Score": gs.get("Grid_Score"),
+                "zones_covered": zones_covered,
+                "zone_strong_count": zone_strong_count,
+                "max_rmsd": max_rmsd_val,
+            }
+            consistency_dict = None
+
+        verdict = classify_molecule_unified(
+            mol_name=mol_name,
+            scores=scores_dict,
+            consistency=consistency_dict,
+            n_replicas=n_replicas,
+            thresholds=unified_thresholds,
+        )
+
+        verdict_rows.append({
+            "Name": mol_name,
+            "verdict": verdict["verdict"],
+            "category": verdict["category"],
+            "reasons": verdict["reasons"],
+            "dG_mean": scores_dict.get("dG_mean") if n_replicas > 1 else scores_dict.get("dG"),
+            "dG_std": scores_dict.get("dG_std") if n_replicas > 1 else None,
+            "dG_sem": scores_dict.get("dG_sem") if n_replicas > 1 else None,
+            "Grid_Score_mean": scores_dict.get("Grid_Score_mean") if n_replicas > 1 else scores_dict.get("Grid_Score"),
+            "Grid_Score_std": scores_dict.get("Grid_Score_std") if n_replicas > 1 else None,
+            "zones_covered": zones_covered,
+            "zone_strong_count": zone_strong_count,
+            "max_rmsd_across_replicas": max_rmsd_val if n_replicas > 1 else scores_dict.get("max_rmsd"),
+            "pose_max_rmsd_inter_replica": pose_rmsd_inter if n_replicas > 1 else None,
+            "sign_change": sign_change if n_replicas > 1 else None,
+            "n_replicas": n_replicas,
+        })
+
         # Consistency matrix rows (top 10 residues)
         if not df_residues.empty:
             for _, row in df_residues.head(10).iterrows():
@@ -842,6 +1098,11 @@ def run_integrated_analysis(
     df_summary.to_csv(summary_path, index=False, encoding="utf-8")
     logger.info(f"  Saved: {summary_path}")
 
+    # Save unified verdict CSV (single source of truth for 07a)
+    verdict_path = output_dir / "unified_verdict.csv"
+    pd.DataFrame(verdict_rows).to_csv(verdict_path, index=False, encoding="utf-8")
+    logger.info(f"  Saved: {verdict_path}")
+
     # Save consistency matrix
     if consistency_rows:
         df_consistency = pd.DataFrame(consistency_rows)
@@ -865,4 +1126,5 @@ def run_integrated_analysis(
         "n_reject": n_reject,
         "html_path": str(html_path),
         "summary_csv": str(summary_path),
+        "unified_verdict_csv": str(verdict_path),
     }

@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from hit_validation.m07_decision_report._footprint_loader import load_footprint_csv
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,14 +45,7 @@ logger = logging.getLogger(__name__)
 
 def load_footprint_data(footprint_csv: str) -> pd.DataFrame:
     """Load footprint_per_molecule.csv from 04b."""
-    df = pd.read_csv(footprint_csv)
-    required = {"Name", "residue_id", "vdw", "es", "total",
-                "ref_vdw", "ref_es", "ref_total",
-                "delta_vdw", "delta_es", "delta_total"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing columns in footprint CSV: {missing}")
-    return df
+    return load_footprint_csv(footprint_csv, extra_required=("Name", "residue_id"))
 
 
 def load_plip_interactions(plip_json: str) -> List[Dict]:

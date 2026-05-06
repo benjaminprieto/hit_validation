@@ -63,7 +63,7 @@ def main():
     docking_ph = cc.get("docking_ph", 6.3)
     atom_type = params.get("atom_type", "sybyl")
     charge_method = params.get("charge_method", "bcc")
-    timeout = params.get("timeout_per_molecule", 300)
+    timeout = params.get("timeout_per_molecule", 1800)
     protonation_tool = params.get("protonation_tool", "obabel")
 
     log_level = args.log_level or params.get("log_level", "INFO")

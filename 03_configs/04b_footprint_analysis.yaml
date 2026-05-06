@@ -8,14 +8,14 @@
 # INPUT:  05_results/{campaign_id}/01c_dock6_run/{name}/{name}_scored.mol2
 #         05_results/{campaign_id}/00b_receptor_preparation/rec_charged.mol2
 #         05_results/{campaign_id}/01e_score_collection/best_poses/ (reference)
-# OUTPUT: 05_results/{campaign_id}/04_dock6_analysis/04b_footprint_rescore/
-#         05_results/{campaign_id}/04_dock6_analysis/04b_footprint_analysis/
+# OUTPUT: 05_results/{campaign_id}/04b_footprint_rescore/
+#         05_results/{campaign_id}/04b_footprint_analysis/
 #
 # REFERENCE: Balius et al. J Chem Inf Model 2011, 51(8):1942-56
 #
 # Project: hit_validation
 # Module: 04b (DOCK6 analysis)
-# Version: 1.1 (2026-03-23) — path fix: 05_dock6 → 04_dock6_analysis
+# Version: 1.2 (2026-04-26) — path flattened: 04_dock6_analysis/ subdir removed
 # =============================================================================
 
 parameters:
@@ -37,8 +37,8 @@ parameters:
   log_level: "INFO"
 
 outputs:
-  rescore_subdir: "04_dock6_analysis/04b_footprint_rescore"
-  analysis_subdir: "04_dock6_analysis/04b_footprint_analysis"
+  rescore_subdir: "04b_footprint_rescore"
+  analysis_subdir: "04b_footprint_analysis"
 
 # =============================================================================
 # USAGE

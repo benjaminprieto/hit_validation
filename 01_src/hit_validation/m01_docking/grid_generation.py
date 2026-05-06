@@ -612,13 +612,14 @@ score_grid_prefix              ligand
     grid_in_path.write_text(grid_in_content)
 
     logger.info(f"  Step 5: Grid calculation (spacing={grid_spacing} A)")
-    logger.info(f"    This may take 5-45 minutes...")
+    logger.info(f"    This may take 5-45 minutes (up to ~80 min on a saturated server)...")
 
     try:
         result = subprocess.run(
             ["grid", "-i", "grid.in", "-o", "grid.out"],
             capture_output=True, text=True,
-            timeout=3600,  # 1 hour max
+            # 4 hours: tolerates 3-4x slowdown from CPU contention with other users
+            timeout=14400,
             cwd=str(out),
         )
 
@@ -645,7 +646,7 @@ score_grid_prefix              ligand
         logger.error("    grid program not found in PATH")
         return None
     except subprocess.TimeoutExpired:
-        logger.error("    grid calculation timed out (>1 hour)")
+        logger.error("    grid calculation timed out (>4 hours)")
         return None
 
 

@@ -34,7 +34,9 @@ Version: 4.0 — adapted for reference docking (2026-03-25)
 """
 
 import argparse
+import json
 import logging
+import secrets
 import sys
 import yaml
 from pathlib import Path
@@ -46,7 +48,7 @@ logging.basicConfig(
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "01_src"))
 
-from hit_validation.m01_docking.dock6_runner import run_dock6_batch, resolve_grid_prefix
+from hit_validation.m01_docking.dock6_run import run_dock6_batch, resolve_grid_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,44 @@ def setup_log_file(log_path: Path, log_level: str = "INFO"):
     fh.setLevel(getattr(logging, log_level.upper(), logging.INFO))
     fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s"))
     logging.getLogger().addHandler(fh)
+
+
+def run_consolidation_mode(args) -> int:
+    """Consolidate DOCK6 per-mol outputs across N replicas via symlinks."""
+    from hit_validation.utils.replica_consolidation_helpers import (
+        discover_replicas, link_or_copy, load_representative_per_mol,
+    )
+
+    cc = load_yaml(args.campaigns)
+    campaign_dir = Path(args.campaigns).parent
+    campaign_id = cc.get("campaign_id", campaign_dir.name)
+    shared_base = Path("05_results") / campaign_id
+
+    replicas = discover_replicas(shared_base, args.n_replicas)
+    if len(replicas) < 2:
+        logger.error(f"Need at least 2 replicas, found {len(replicas)}")
+        return 1
+
+    rep_csv = shared_base / "_replica_metadata" / "representative_per_mol.csv"
+    rep_per_mol = load_representative_per_mol(rep_csv)
+
+    output_dir = shared_base / "01c_dock6_run" / "consolidated"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Consolidating DOCK6 from {len(replicas)} replicas -> {output_dir}")
+
+    n_linked = 0
+    for mol, rep_id in rep_per_mol.items():
+        src_dir = shared_base / f"replica_{rep_id}" / "01c_dock6_run" / mol
+        if not src_dir.exists():
+            logger.warning(f"Missing DOCK6 output for {mol} in replica_{rep_id}: {src_dir}")
+            continue
+        dst_dir = output_dir / mol
+        link_or_copy(src_dir, dst_dir)
+        n_linked += 1
+
+    logger.info(f"DOCK6 consolidation: linked {n_linked}/{len(rep_per_mol)} molecules")
+    return 0
 
 
 def main():
@@ -82,8 +122,22 @@ def main():
                         help="Generate input files only")
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--replica-id", type=int, default=None,
+                        help="Replica ID (1-indexed). None=legacy non-replicated mode.")
+    parser.add_argument("--consolidate-replicas", action="store_true",
+                        help="Consolidate per-mol DOCK6 outputs from N replicas into "
+                             "01c_dock6_run/consolidated/ via symlinks to representative.")
+    parser.add_argument("--n-replicas", type=int, default=1,
+                        help="Number of replicas to consolidate. Used only with --consolidate-replicas.")
 
     args = parser.parse_args()
+
+    if args.consolidate_replicas:
+        if args.n_replicas < 2:
+            parser.error("--consolidate-replicas requires --n-replicas >= 2")
+        if args.replica_id is not None:
+            parser.error("--consolidate-replicas cannot be combined with --replica-id")
+        return run_consolidation_mode(args)
 
     # =========================================================================
     # RESOLVE PARAMETERS
@@ -93,9 +147,15 @@ def main():
     campaign_dir = Path(args.campaigns).parent
     campaign_id = cc.get("campaign_id", campaign_dir.name)
 
-    # --- Grid routing ---
+    # --- Path resolution: shared_base vs results_base ---
+    shared_base = Path("05_results") / campaign_id
+    results_base = shared_base
+    if args.replica_id is not None:
+        results_base = shared_base / f"replica_{args.replica_id}"
+
+    # --- Grid routing (SHARED input) ---
     gc = cc.get("grids", {})
-    grid_dir_01b = Path("05_results") / campaign_id / "01b_grid_generation"
+    grid_dir_01b = shared_base / "01b_grid_generation"
 
     if (grid_dir_01b / gc.get("spheres_file", "spheres_ligand.sph")).exists():
         grid_path = grid_dir_01b
@@ -113,12 +173,12 @@ def main():
         str(grid_path), gc.get("energy_grid", "ligand.nrg"),
     )
 
-    # --- Ligand routing (reference docking) ---
+    # --- Ligand routing (SHARED input — 00a output) ---
     # Priority: 00a output > campaign_config.ligand_mol2 > campaign_dir/ligands/
     ligand_dir = None
 
     # 1. Output from 00a_ligand_preparation (primary source in hit_validation)
-    ligand_dir_00a = Path("05_results") / campaign_id / "00a_ligand_preparation"
+    ligand_dir_00a = shared_base / "00a_ligand_preparation"
     if ligand_dir_00a.exists() and list(ligand_dir_00a.glob("*/*.mol2")):
         ligand_dir = str(ligand_dir_00a)
         logger.info(f"Using ligands from 00a: {ligand_dir}")
@@ -143,10 +203,8 @@ def main():
     if not ligand_dir:
         ligand_dir = str(ligand_dir_00a)  # Will fail with clear error below
 
-    # --- Output ---
-    output_dir = args.output or str(
-        Path("05_results") / campaign_id / "01c_dock6_run"
-    )
+    # --- Output (REPLICATED) ---
+    output_dir = args.output or str(results_base / "01c_dock6_run")
 
     # --- Module config ---
     mc = load_yaml(args.config)
@@ -171,6 +229,28 @@ def main():
                 "write_orientations"]:
         if key in params:
             extra_params[key] = params[key]
+
+    # ---- Explicit DOCK6 seed (Fase D / Sección 5) ----
+    # Always generate an explicit, persisted seed when not pinned in the YAML.
+    # This makes the simplex non-deterministic across replicas (good) but
+    # *reproducible* per replica (recoverable from .seeds.json).
+    if "simplex_random_seed" not in extra_params or extra_params["simplex_random_seed"] in (0, -1):
+        extra_params["simplex_random_seed"] = secrets.randbits(31)
+
+    seeds_path = Path(results_base) / ".seeds.json"
+    seeds_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_seeds: dict = {}
+    if seeds_path.exists():
+        try:
+            existing_seeds = json.loads(seeds_path.read_text())
+        except Exception:
+            existing_seeds = {}
+    existing_seeds["dock6_simplex_random_seed"] = int(extra_params["simplex_random_seed"])
+    seeds_path.write_text(json.dumps(existing_seeds, indent=2))
+    logger.info(
+        f"DOCK6 simplex_random_seed = {extra_params['simplex_random_seed']} "
+        f"(persisted to {seeds_path})"
+    )
 
     # CLI overrides
     if args.method:

@@ -40,6 +40,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | 
 sys.path.insert(0, str(Path(__file__).parent.parent / "01_src"))
 
 from hit_validation.m07_decision_report.binding_mode_analysis import run_binding_mode_analysis
+from hit_validation.utils.paths import resolve_footprint_analysis_dir
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,9 @@ def main():
                         help="Skip community detection (Layer 3)")
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--n-replicas", type=int, default=1,
+                        help="Number of replicas. When >1, footprint and 01i MD dir "
+                             "are read from <module>/consolidated/.")
     args = parser.parse_args()
 
     # =========================================================================
@@ -88,14 +92,29 @@ def main():
     output_subdir = mc.get("outputs", {}).get("subdir", "07d_binding_mode_analysis")
     output_dir = Path(args.output) if args.output else results_base / output_subdir
 
-    footprint_csv = results_base / "04_dock6_analysis" / "04b_footprint_analysis" / "footprint_per_molecule.csv"
+    n_replicas = max(1, int(args.n_replicas))
+    if n_replicas > 1:
+        consolidated_fp = (results_base / "04b_footprint_analysis" / "consolidated"
+                           / "footprint_per_molecule.csv")
+        if consolidated_fp.exists():
+            footprint_csv = consolidated_fp
+        else:
+            footprint_csv = resolve_footprint_analysis_dir(results_base) / "footprint_per_molecule.csv"
+    else:
+        footprint_csv = resolve_footprint_analysis_dir(results_base) / "footprint_per_molecule.csv"
+
     if not footprint_csv.exists():
         logger.error(f"Required: {footprint_csv}")
         return 1
 
-    # Optional: ProLIF from 01i
-    md_dir = results_base / "01i_trajectory_analysis"
-    md_dir = str(md_dir) if md_dir.exists() else None
+    # Optional: ProLIF from 01i — prefer consolidated/ when N>1
+    if n_replicas > 1:
+        md_candidate = results_base / "01i_trajectory_analysis" / "consolidated"
+        if not md_candidate.exists():
+            md_candidate = results_base / "01i_trajectory_analysis"
+    else:
+        md_candidate = results_base / "01i_trajectory_analysis"
+    md_dir = str(md_candidate) if md_candidate.exists() else None
 
     # =========================================================================
     # MERGE PARAMETERS

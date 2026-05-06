@@ -709,7 +709,7 @@ def extract_best_pose_as_mol2(scored_mol2: str, output_mol2: str,
     Reads the DOCK6 scored mol2, finds the pose with the lowest
     score_key value, and writes it as a single-pose mol2.
     """
-    from hit_validation.m01_docking.score_collector import (
+    from hit_validation.m01_docking.score_collection import (
         parse_scored_mol2, get_best_pose,
     )
 

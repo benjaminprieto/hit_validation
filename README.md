@@ -1,4 +1,7 @@
 # HIT_VALIDATION
+# cd ~/projects/hit_validation
+# conda activate hit_validation_env
+# claude --dangerously-skip-permissions
 
 Pipeline de validacion rigurosa de hits de screening virtual con DOCK6. Evalua cada hit en base a meritos absolutos (scoring, cobertura de zonas, interacciones PLIP) para generar evidencia de decision: seleccion como template Pharmit o compra. Datos pre-computados de referencia (ej. UDX de `reference_docking`) se importan como contexto informativo en tablas de salida, pero nunca se usan como input de ningun paso del pipeline.
 
@@ -109,8 +112,55 @@ hit_validation/
 ## Pipeline completo
 
 ```
-00a → 00b → 00d → 01b → 01c → 01d → 01f → 01e → 03a → 04b → [06a → 06b] → 07a
+00a → 00b → 00d → 01b → 01c → 01d → 01f → 01e → 03a → 04b → 01g → 01h → 01i
+                                                  → 06a → 06b → 07a → 07b → 07c → 07d
 ```
+
+### Configuracion de `n_replicas`
+
+`n_replicas` se lee con la siguiente precedencia (la primera definicion gana):
+
+1. **`04_data/campaigns/<id>/campaign_config.yaml`** — mas especifico, recomendado para campañas nuevas.
+2. **`03_configs/pipeline_config.yaml`** — fallback global.
+3. **Default** — `1` si ningun config lo define.
+
+Recomendacion: definir `n_replicas` explicitamente en cada campaign_config para
+trazabilidad (ningun lector tiene que cruzarse con el global para saber con que
+N corrio una campaña):
+
+```yaml
+# 04_data/campaigns/<campaign_id>/campaign_config.yaml
+campaign_id: "..."
+# ... otros campos ...
+n_replicas: 3   # 1 = legacy single-run; N>1 = UQ replicada
+```
+
+`run_pipeline.sh` imprime al inicio
+`[CONFIG] n_replicas = <N> (source: <campaign_config|pipeline_config (fallback)>)`
+para dejar registro del valor efectivo en el log.
+
+Helpers bajo `02_scripts/utils/`:
+
+- `audit_campaign_ids.py` — verifica que el `campaign_id` interno de cada
+  `campaign_config.yaml` coincida con el nombre del directorio.
+- `migrate_n_replicas_to_campaign_configs.py` — idempotente; agrega
+  `n_replicas: <default>` a configs que no lo tengan.
+
+### Modo replicas (n_replicas > 1)
+
+Cuando `n_replicas: N` (con N ≥ 2) en `campaign_config.yaml` (o como fallback en `pipeline_config.yaml`):
+
+1. **Fase SHARED** (1×): 00a, 00b, 00d, 01b
+2. **Fase REPLICATED** (N×): 01c → 01d → 01f → 01e → 03a → 04b → 01g → 01h → 01i bajo `replica_1/`, `replica_2/`, ... `replica_N/`
+3. **Fase CONSOLIDACION** (distribuida):
+   - `01h_mmpbsa_analysis.py --consolidate-replicas` produce `01h_mmpbsa_analysis/consolidated/consolidated_mmpbsa.csv` con mean ± std.
+   - `02_scripts/utils/select_representative_replicas.py` produce `_replica_metadata/representative_per_mol.csv` (la replica representativa por molecula es la mas cercana al mean ΔG MMPBSA, usada solo para visualizacion).
+   - El resto de los modulos consolida con `--consolidate-replicas`: 01c, 01e, 03a, 04b, 01i.
+4. **Fase POST-REPLICA**: 06a, 06b, 07a, 07b, 07c, 07d leen de `<modulo>/consolidated/` y `_replica_metadata/`.
+
+El modulo 07f (replica consolidation) fue eliminado el 2026-04-27. Su funcionalidad
+quedo distribuida en cada modulo replicado. La deteccion de "discordant" (replicas
+que disienten) es responsabilidad de 07c en Fase D (proximo instructivo).
 
 ### 00a — Preparacion de ligandos (REESCRITO)
 
@@ -321,8 +371,7 @@ bash run_pipeline.sh 04_data/campaigns/mi_campana/campaign_config.yaml 06a
 ├── 01f_gbsa_rescore/           {name}/{name}_gbsa_scored.mol2
 ├── 01e_score_collection/       dock6_scores.csv, dock6_scores.xlsx, best_poses/
 ├── 03a_plip_analysis/          {name}/interactions.json, plip_summary_all.csv
-├── 04_dock6_analysis/
-│   └── 04b_footprint_analysis/ footprint_per_molecule.csv, residue_consensus.csv,
+├── 04b_footprint_analysis/     footprint_per_molecule.csv, residue_consensus.csv,
 │                                hit_vs_udx_comparison.csv, subpocket_coverage.csv,
 │                                ranking_by_zone.csv, binding_site_zones.html
 ├── 06a_pharmit/                pharmacophore_{strategy}.json (condicional)

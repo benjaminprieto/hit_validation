@@ -22,10 +22,36 @@ parameters:
   pose_index: 1
 
   # MMPBSA parameters
+  #
+  # User-facing toggles (mmgbsa, mmpbsa, timeout) are also overridable per
+  # campaign via a top-level `mmpbsa_decomp:` block in
+  # 04_data/campaigns/<id>/campaign_config.yaml.
+  # Precedence: campaign_config.mmpbsa_decomp > this file > code default.
+  #
+  # Strategy for triage (large libraries):
+  #   - First pass: mmgbsa=true, mmpbsa=false  → ~1.5h/mol on ~11k-atom receptor.
+  #   - Second pass on top hits: mmgbsa=true, mmpbsa=true → ~10-12h/mol.
+  # Module 07 only consumes GB metrics (MMPBSA_EGB, MMPBSA_dG_total), so
+  # GB-only runs are fully compatible with the decision report. PB columns
+  # in dG_per_frame.csv simply remain absent when mmpbsa=false.
   mmpbsa:
+    # ---- Toggles (campaign-overridable) ------------------------------------
+    mmgbsa: true      # activate MM-GBSA (Generalized Born) — fast, ~1.5h/mol
+    mmpbsa: true      # activate MM-PBSA (Poisson-Boltzmann) — rigorous, ~10-12h/mol
+    # MMPBSA.py subprocess timeout (seconds).
+    # Reference timings on a ~11k-atom receptor with 50 MD frames:
+    #   - GB-only:    ~1.5h
+    #   - GB + PB:    ~10-12h
+    # Default 72h gives ample margin for PB on edge-case systems.
+    timeout: 259200
+    # ---- Technical params (rarely changed per-campaign) --------------------
     idecomp: 1        # per-residue decomposition
     igb: 2            # OBC-II (Onufriev-Bashford-Case)
     saltcon: 0.15     # 150 mM NaCl
+    # PB parameters (used only when mmpbsa=true)
+    istrng: 0.150     # ionic strength (M) for PB
+    fillratio: 4.0    # PB grid fill ratio
+    radiopt: 0        # 0 = use prmtop radii, 1 = optimize radii
 
   # Force field
   receptor_ff: "ff14SB"
@@ -35,12 +61,17 @@ parameters:
   # MD Protocol (only used when mode = md)
   md:
     engine: "openmm"
-    production_ns: 5.0
+    production_ns: 50.0
     dt: 0.002
     temperature: 300.0
     pressure: 1.0
     save_interval_ps: 10.0
-    mmpbsa_interval_ps: 100.0
+    # cpptraj strip stride: offset = mmpbsa_interval_ps / save_interval_ps.
+    # 1000 ps / 10 ps = stride 100 -> 50 frames over 50 ns MD.
+    # Required for 07e temporal analysis: equilibration detection (pymbar),
+    # block averaging for SEM, basin transitions, cross-campaign KS tests.
+    # Was 5000.0 (10 frames) -- insufficient for temporal analysis.
+    mmpbsa_interval_ps: 1000.0
     solvent_padding: 10.0
     ionic_strength: 0.15
     heating_ps: 100.0

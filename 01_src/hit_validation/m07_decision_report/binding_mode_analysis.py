@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from hit_validation.m07_decision_report._footprint_loader import load_footprint_csv
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +59,7 @@ def build_iev_matrix(
         mol_names: list of molecule names
         residue_ids: list of residue ids (columns)
     """
-    df = pd.read_csv(footprint_csv)
+    df = load_footprint_csv(footprint_csv)
 
     # Identify residues significant in any molecule
     residue_max = df.groupby("residue_id")["total"].apply(lambda x: x.abs().max())
@@ -88,7 +90,7 @@ def build_iev_matrix_vdw_es(
     Build IEV matrix with separate VDW and ES columns per residue.
     This gives 2x features and captures the character of each interaction.
     """
-    df = pd.read_csv(footprint_csv)
+    df = load_footprint_csv(footprint_csv)
 
     residue_max = df.groupby("residue_id")["total"].apply(lambda x: x.abs().max())
     significant_residues = residue_max[residue_max >= energy_cutoff].index.tolist()
@@ -274,7 +276,7 @@ def build_cocontact_network(
 
     Returns edge list DataFrame: residue_A, residue_B, weight, molecules
     """
-    df = pd.read_csv(footprint_csv)
+    df = load_footprint_csv(footprint_csv)
 
     # Per molecule, get set of contacted residues
     contact_sets = {}
@@ -375,7 +377,7 @@ def characterize_communities(
     For each community: which molecules contact it, total energy,
     dominant interaction type (vdw vs es), functional annotations.
     """
-    df = pd.read_csv(footprint_csv)
+    df = load_footprint_csv(footprint_csv)
 
     rows = []
     for cid, residues in communities.items():

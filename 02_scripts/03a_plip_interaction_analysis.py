@@ -48,6 +48,44 @@ def setup_log_file(log_path: Path, log_level: str = "INFO"):
     logging.getLogger().addHandler(fh)
 
 
+def run_consolidation_mode(args) -> int:
+    """Consolidate PLIP outputs across N replicas via symlinks to representative replica."""
+    from hit_validation.utils.replica_consolidation_helpers import (
+        discover_replicas, link_or_copy, load_representative_per_mol,
+    )
+
+    cc = load_yaml(args.campaigns)
+    campaign_dir = Path(args.campaigns).parent
+    campaign_id = cc.get("campaign_id", campaign_dir.name)
+    shared_base = Path("05_results") / campaign_id
+
+    replicas = discover_replicas(shared_base, args.n_replicas)
+    if len(replicas) < 2:
+        logger.error(f"Need at least 2 replicas, found {len(replicas)}")
+        return 1
+
+    rep_csv = shared_base / "_replica_metadata" / "representative_per_mol.csv"
+    rep_per_mol = load_representative_per_mol(rep_csv)
+
+    output_dir = shared_base / "03a_plip_analysis" / "consolidated"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Consolidating PLIP from {len(replicas)} replicas -> {output_dir}")
+
+    n_linked = 0
+    for mol, rep_id in rep_per_mol.items():
+        src = shared_base / f"replica_{rep_id}" / "03a_plip_analysis" / mol
+        if not src.exists():
+            logger.warning(f"Missing PLIP for {mol} in replica_{rep_id}: {src}")
+            continue
+        dst = output_dir / mol
+        link_or_copy(src, dst)
+        n_linked += 1
+
+    logger.info(f"PLIP consolidation: linked {n_linked}/{len(rep_per_mol)} molecules")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="03a PLIP Interaction Analysis — docked pose interactions",
@@ -57,7 +95,21 @@ def main():
     parser.add_argument("--output", "-o", type=str, default=None)
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--replica-id", type=int, default=None,
+                        help="Replica ID (1-indexed). None=legacy non-replicated mode.")
+    parser.add_argument("--consolidate-replicas", action="store_true",
+                        help="Consolidate per-mol PLIP from N replicas into "
+                             "03a_plip_analysis/consolidated/ via symlinks to representative.")
+    parser.add_argument("--n-replicas", type=int, default=1,
+                        help="Number of replicas to consolidate. Used only with --consolidate-replicas.")
     args = parser.parse_args()
+
+    if args.consolidate_replicas:
+        if args.n_replicas < 2:
+            parser.error("--consolidate-replicas requires --n-replicas >= 2")
+        if args.replica_id is not None:
+            parser.error("--consolidate-replicas cannot be combined with --replica-id")
+        return run_consolidation_mode(args)
 
     # --- Config defaults ---
     pose_source = "01c_dock6_run"
@@ -81,16 +133,20 @@ def main():
     cc = load_yaml(args.campaigns)
     campaign_dir = Path(args.campaigns).parent
     campaign_id = cc.get("campaign_id", campaign_dir.name)
-    results_base = Path("05_results") / campaign_id
 
-    # Docking output directory (from 01c)
+    shared_base = Path("05_results") / campaign_id
+    results_base = shared_base
+    if args.replica_id is not None:
+        results_base = shared_base / f"replica_{args.replica_id}"
+
+    # Docking output directory (from 01c, REPLICATED)
     docking_dir = str(results_base / pose_source)
 
-    # Receptor: protonated from 00b
+    # Receptor: protonated from 00b (SHARED)
     receptor_path = None
     candidates = [
-        results_base / "00b_receptor_preparation" / "receptor_protonated.pdb",
-        results_base / "00b_receptor_preparation" / "receptor_clean.pdb",
+        shared_base / "00b_receptor_preparation" / "receptor_protonated.pdb",
+        shared_base / "00b_receptor_preparation" / "receptor_clean.pdb",
     ]
     for c in candidates:
         if c.exists():
@@ -106,7 +162,7 @@ def main():
             if candidate.exists():
                 receptor_path = str(candidate)
 
-    # Output directory
+    # Output directory (REPLICATED)
     output_subdir = "03a_plip_analysis"
     if args.config:
         mc = load_yaml(args.config)

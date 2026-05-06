@@ -38,7 +38,7 @@ logging.basicConfig(
 sys.path.insert(0, str(Path(__file__).parent.parent / "01_src"))
 
 import pandas as pd
-from hit_validation.m01_docking.score_collector import run_score_collection
+from hit_validation.m01_docking.score_collection import run_score_collection
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +121,38 @@ def setup_log_file(log_path: Path, log_level: str = "INFO"):
     logging.getLogger().addHandler(fh)
 
 
+def run_consolidation_mode(args) -> int:
+    """Consolidate dock6_scores.csv across N replicas into <output>/consolidated/."""
+    from hit_validation.utils.replica_consolidation_helpers import discover_replicas
+    from hit_validation.m01_docking.score_collection import (
+        consolidate_score_collection_replicas,
+    )
+
+    cc = load_yaml(args.campaigns)
+    campaign_id = cc.get("campaign_id", Path(args.campaigns).parent.name)
+    shared_base = Path("05_results") / campaign_id
+
+    replicas = discover_replicas(shared_base, args.n_replicas)
+    if len(replicas) < 2:
+        logger.error(f"Need at least 2 replicas, found {len(replicas)}")
+        return 1
+
+    output_dir = shared_base / "01e_score_collection" / "consolidated"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Consolidating 01e from {len(replicas)} replicas -> {output_dir}")
+
+    result = consolidate_score_collection_replicas(replicas, output_dir)
+    if not result.get("success"):
+        logger.error(f"Consolidation failed: {result.get('error')}")
+        return 1
+    logger.info(
+        f"01e consolidation done: {result['n_molecules']} molecules, "
+        f"{result.get('n_aggregated_columns', 0)} aggregated columns"
+    )
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="01e Score Collection — Collect DOCK6 scores and produce "
@@ -136,8 +168,22 @@ def main():
                         help="Override docking directory (default: 01c output)")
     parser.add_argument("--log-level", type=str, default=None,
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--replica-id", type=int, default=None,
+                        help="Replica ID (1-indexed). None=legacy non-replicated mode.")
+    parser.add_argument("--consolidate-replicas", action="store_true",
+                        help="Consolidate dock6_scores.csv across N replicas into "
+                             "01e_score_collection/consolidated/ with mean+/-std+/-sem.")
+    parser.add_argument("--n-replicas", type=int, default=1,
+                        help="Number of replicas to consolidate. Used only with --consolidate-replicas.")
 
     args = parser.parse_args()
+
+    if args.consolidate_replicas:
+        if args.n_replicas < 2:
+            parser.error("--consolidate-replicas requires --n-replicas >= 2")
+        if args.replica_id is not None:
+            parser.error("--consolidate-replicas cannot be combined with --replica-id")
+        return run_consolidation_mode(args)
 
     # --- Load configs ---
     cc = load_yaml(args.campaigns)
@@ -145,15 +191,18 @@ def main():
     mc = load_yaml(args.config)
     params = mc.get("parameters", {})
 
-    docking_dir = args.docking_dir or str(
-        Path("05_results") / campaign_id / "01c_dock6_run"
-    )
-    fps_dir = str(Path("05_results") / campaign_id / "01d_footprint_rescore")
-    gbsa_dir = str(Path("05_results") / campaign_id / "01f_gbsa_rescore")
+    # --- Path resolution ---
+    shared_base = Path("05_results") / campaign_id
+    results_base = shared_base
+    if args.replica_id is not None:
+        results_base = shared_base / f"replica_{args.replica_id}"
+
+    # All inputs/outputs are REPLICATED (01c, 01d, 01f)
+    docking_dir = args.docking_dir or str(results_base / "01c_dock6_run")
+    fps_dir = str(results_base / "01d_footprint_rescore")
+    gbsa_dir = str(results_base / "01f_gbsa_rescore")
     molecules_csv = None  # Not used in reference docking (no screening catalog)
-    output_dir = args.output or str(
-        Path("05_results") / campaign_id / "01e_score_collection"
-    )
+    output_dir = args.output or str(results_base / "01e_score_collection")
 
     # --- Params ---
     score_key = params.get("score_key", "Grid_Score")

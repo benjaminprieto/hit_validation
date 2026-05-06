@@ -42,6 +42,30 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# FUNCTIONAL ATOMS MAPPING (per residue type)
+# =============================================================================
+# For d_func: distance from ligand to chemically relevant atoms of each residue
+# (instead of Cα which is meaningless for binding interactions).
+
+FUNCTIONAL_ATOMS = {
+    'TRP': ['NE1', 'CG', 'CD1', 'CD2', 'CE2', 'CE3', 'CZ2', 'CZ3', 'CH2'],
+    'GLU': ['OE1', 'OE2'],
+    'ASP': ['OD1', 'OD2'],
+    'LYS': ['NZ'],
+    'ARG': ['NH1', 'NH2', 'NE'],
+    'HIS': ['ND1', 'NE2'],
+    'SER': ['OG'],
+    'THR': ['OG1'],
+    'TYR': ['OH', 'CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ'],
+    'PHE': ['CG', 'CD1', 'CD2', 'CE1', 'CE2', 'CZ'],
+    'ASN': ['OD1', 'ND2'],
+    'GLN': ['OE1', 'NE2'],
+    'CYS': ['SG'],
+    'MET': ['SD'],
+}
+
+
+# =============================================================================
 # LIGAND AUTO-DETECTION
 # =============================================================================
 
@@ -60,6 +84,30 @@ def detect_ligand_resname(complex_prmtop: Union[str, Path]) -> Optional[str]:
         return parm.residues[-1].name
     except Exception as e:
         logger.warning(f"  Ligand detection failed: {e}")
+        return None
+
+
+_NON_PROTEIN_RESNAMES = {
+    "WAT", "HOH", "TIP3", "TIP4", "T3P", "T4P",
+    "Na+", "Cl-", "K+", "MG", "ZN", "CA",
+    "NA", "CL",
+}
+
+
+def detect_n_protein_residues(complex_prmtop: Union[str, Path]) -> Optional[int]:
+    """
+    Auto-detect number of protein residues from AMBER prmtop.
+
+    Counts residues excluding waters, ions, and the ligand (last residue).
+    Returns count or None if detection fails.
+    """
+    try:
+        import parmed
+        parm = parmed.load_file(str(complex_prmtop))
+        residues = parm.residues[:-1]
+        return sum(1 for r in residues if r.name not in _NON_PROTEIN_RESNAMES)
+    except Exception as e:
+        logger.warning(f"  n_protein_res detection failed: {e}")
         return None
 
 
@@ -96,7 +144,7 @@ quit
 CPPTRAJ_SOLVATED_TEMPLATE = """\
 # 01i Water Bridge Analysis -- solvated trajectory
 parm {solvated_prmtop}
-trajin {production_dcd}
+trajin {production_dcd} 1 last {stride}
 
 # Strip ions, keep water
 strip :Na+,Cl-
@@ -215,6 +263,7 @@ def generate_cpptraj_solvated_script(
         output_dir: str,
         lig_mask: str = "LIG",
         n_protein_res: int = 706,
+        water_bridge_stride: int = 10,
 ) -> str:
     """Generate cpptraj input script for water bridge analysis."""
     script = CPPTRAJ_SOLVATED_TEMPLATE.format(
@@ -223,6 +272,7 @@ def generate_cpptraj_solvated_script(
         output_dir=output_dir,
         lig_mask=lig_mask,
         n_protein_res=n_protein_res,
+        stride=water_bridge_stride,
     )
     return script
 
@@ -396,6 +446,142 @@ def collect_distances(
 
 
 # =============================================================================
+# PER-FRAME DISTANCES (d_min, d_func) — added v2.0, 2026-04-27
+# =============================================================================
+
+def build_cpptraj_distances_script(
+        prmtop: Union[str, Path],
+        trajectory: Union[str, Path],
+        functional_residues: List[Dict[str, str]],
+        lig_resname: str,
+        output_dir: Union[str, Path],
+) -> str:
+    """
+    Build cpptraj input script to compute d_min and d_func for each residue.
+
+    Args:
+        functional_residues: List of dicts from campaign_config:
+            [{'name': 'GLU529', 'function': 'Catalytic base', ...}, ...]
+    """
+    output_dir = Path(output_dir)
+
+    lines = [
+        f"parm {Path(prmtop).resolve()}",
+        f"trajin {Path(trajectory).resolve()}",
+    ]
+
+    for res in functional_residues:
+        name = res.get('name', '')
+        m = re.match(r'([A-Z]{3})(\d+)', name)
+        if not m:
+            logger.warning(f"Skipping malformed residue name: {name}")
+            continue
+
+        res_type, res_num = m.groups()
+        functional_atoms = FUNCTIONAL_ATOMS.get(res_type, [])
+
+        lines.append(
+            f"distance dmin_{name} :{lig_resname} :{res_num} out "
+            f"{output_dir.resolve()}/distances_dmin_{name}.dat"
+        )
+
+        if functional_atoms:
+            atom_mask = ",".join(functional_atoms)
+            lines.append(
+                f"distance dfunc_{name} :{lig_resname} :{res_num}@{atom_mask} out "
+                f"{output_dir.resolve()}/distances_dfunc_{name}.dat"
+            )
+
+    lines.append("go")
+    lines.append("quit")
+
+    return "\n".join(lines)
+
+
+def compute_distances_per_frame(
+        mol_dir: Union[str, Path],
+        output_dir: Union[str, Path],
+        functional_residues: List[Dict[str, str]],
+        lig_resname: str = "MOL",
+        cpptraj_timeout: int = 600,
+) -> Dict[str, Any]:
+    """
+    Compute d_min and d_func for each functional residue along the trajectory.
+
+    Reads:
+        mol_dir/topologies/complex.prmtop
+        mol_dir/trajectory/dry_trajectory.mdcrd
+
+    Writes:
+        output_dir/distances_per_frame.csv
+    """
+    mol_dir = Path(mol_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    prmtop = mol_dir / "topologies" / "complex.prmtop"
+    trajectory = mol_dir / "trajectory" / "dry_trajectory.mdcrd"
+
+    if not prmtop.exists() or not trajectory.exists():
+        return {"success": False, "error": f"Missing prmtop or trajectory in {mol_dir}"}
+
+    if not functional_residues:
+        return {"success": False, "error": "No functional residues defined"}
+
+    script = build_cpptraj_distances_script(
+        prmtop=prmtop,
+        trajectory=trajectory,
+        functional_residues=functional_residues,
+        lig_resname=lig_resname,
+        output_dir=output_dir,
+    )
+
+    script_path = output_dir / "cpptraj_distances.in"
+    script_path.write_text(script)
+
+    proc = subprocess.run(
+        ["cpptraj", "-i", str(script_path)],
+        capture_output=True, text=True,
+        timeout=cpptraj_timeout,
+    )
+
+    if proc.returncode != 0:
+        return {
+            "success": False,
+            "error": f"cpptraj failed: {proc.stderr[-300:]}",
+        }
+
+    dat_files = sorted(output_dir.glob("distances_*.dat"))
+    if not dat_files:
+        return {"success": False, "error": "No distance .dat files produced"}
+
+    all_distances = {}
+    for dat in dat_files:
+        col_name = dat.stem.replace("distances_", "")
+        df = pd.read_csv(dat, sep=r'\s+', comment='#', header=None,
+                         names=['frame', col_name])
+        all_distances[col_name] = df.set_index('frame')[col_name]
+
+    combined = pd.DataFrame(all_distances)
+    combined['frame'] = combined.index
+    combined = combined.reset_index(drop=True)
+    combined['time_ns'] = combined['frame'].astype(float)
+
+    cols = ['frame', 'time_ns'] + [c for c in combined.columns if c not in ('frame', 'time_ns')]
+    combined = combined[cols]
+
+    output_csv = output_dir / "distances_per_frame.csv"
+    combined.to_csv(output_csv, index=False)
+
+    return {
+        "success": True,
+        "n_frames": len(combined),
+        "n_residues": len(functional_residues),
+        "output_csv": str(output_csv),
+    }
+
+
+# =============================================================================
 # PROLIF ANALYSIS
 # =============================================================================
 
@@ -498,9 +684,10 @@ def run_trajectory_analysis(
         campaign_config: Dict,
         residue_mapping_csv: Optional[str] = None,
         lig_resname: str = "UNL",
-        n_protein_res: int = 706,
+        n_protein_res: Optional[int] = None,
         cpptraj_timeout: int = 600,
         cpptraj_solvated_timeout: int = 3600,
+        water_bridge_stride: int = 10,
         run_prolif: bool = True,
         reparse_only: bool = False,
 ) -> Dict:
@@ -517,7 +704,8 @@ def run_trajectory_analysis(
         campaign_config: parsed campaign_config.yaml
         residue_mapping_csv: path to 04b residue_mapping.csv
         lig_resname: ligand residue name in topology
-        n_protein_res: number of protein residues
+        n_protein_res: number of protein residues. If None, auto-detected from
+                       residue_mapping (preferred) or complex.prmtop (fallback).
         cpptraj_timeout: timeout for cpptraj in seconds
         run_prolif: whether to run ProLIF analysis
     """
@@ -558,15 +746,28 @@ def run_trajectory_analysis(
 
     # --- Load residue mapping ---
     residue_mapping = {}
+    explicit_n_protein_res = n_protein_res
     if residue_mapping_csv and Path(residue_mapping_csv).exists():
         residue_mapping = load_residue_mapping(residue_mapping_csv)
         logger.info(f"  Residue mapping: {len(residue_mapping)} residues")
-        # Auto-detect n_protein_res from mapping (more reliable than config)
         if len(residue_mapping) > 0:
             n_protein_res = len(residue_mapping)
-            logger.info(f"  n_protein_res auto-detected from mapping: {n_protein_res}")
+            logger.info(f"  n_protein_res from residue mapping: {n_protein_res}")
     else:
         logger.warning("  No residue mapping found. Distance monitoring will be limited.")
+
+    # --- Resolve n_protein_res: explicit override > residue_mapping > prmtop autodetect ---
+    if explicit_n_protein_res is not None:
+        n_protein_res = explicit_n_protein_res
+        logger.info(f"  n_protein_res from explicit YAML override: {n_protein_res}")
+    elif not residue_mapping:
+        detected = detect_n_protein_residues(complex_prmtop)
+        if detected is None:
+            return {"success": False,
+                    "error": f"Could not determine n_protein_res for {mol_name}: "
+                             f"no residue_mapping, no explicit YAML value, prmtop detection failed"}
+        n_protein_res = detected
+        logger.info(f"  n_protein_res auto-detected from prmtop: {n_protein_res}")
 
     # --- Determine monitored residues ---
     monitored = get_monitored_residues(campaign_config, residue_mapping)
@@ -648,6 +849,45 @@ def run_trajectory_analysis(
             df_rmsf.columns = ["residue_seq", "rmsf"]
             df_rmsf.to_csv(output_dir / "rmsf_per_residue.csv", index=False)
 
+    # --- Part 1b: Distances per frame (d_min, d_func) for functional residues ---
+    if not reparse_only:
+        func_res_raw = campaign_config.get("functional_residues", {})
+        functional_residues_list: List[Dict[str, str]] = []
+        if isinstance(func_res_raw, dict):
+            for name, meta in func_res_raw.items():
+                entry = {"name": name}
+                if isinstance(meta, dict):
+                    entry.update({k: str(v) for k, v in meta.items()})
+                functional_residues_list.append(entry)
+        elif isinstance(func_res_raw, list):
+            for item in func_res_raw:
+                if isinstance(item, str):
+                    functional_residues_list.append({"name": item})
+                elif isinstance(item, dict):
+                    functional_residues_list.append(item)
+
+        if functional_residues_list:
+            logger.info(
+                f"  Computing distances for {len(functional_residues_list)} functional residues"
+            )
+            dist_result = compute_distances_per_frame(
+                mol_dir=mmpbsa_dir,
+                output_dir=output_dir,
+                functional_residues=functional_residues_list,
+                lig_resname=lig_resname,
+                cpptraj_timeout=cpptraj_timeout,
+            )
+            if dist_result["success"]:
+                logger.info(
+                    f"  Distances per-frame: {dist_result['n_frames']} frames, "
+                    f"{dist_result['n_residues']} residues"
+                )
+                results["distances_per_frame_csv"] = dist_result["output_csv"]
+            else:
+                logger.warning(f"  Distance calculation failed: {dist_result.get('error')}")
+        else:
+            logger.info("  No functional_residues in campaign_config, skipping distances")
+
     # --- Part 2: Water bridges ---
     wb_dat = output_dir / "water_bridges.dat"
     if reparse_only and wb_dat.exists():
@@ -670,6 +910,7 @@ def run_trajectory_analysis(
             output_dir=str(output_dir),
             lig_mask=lig_resname,
             n_protein_res=n_protein_res,
+            water_bridge_stride=water_bridge_stride,
         )
 
         script_path_solv = output_dir / "cpptraj_solvated.in"
@@ -736,10 +977,11 @@ def run_trajectory_analysis_batch(
         residue_mapping_csv: Optional[str] = None,
         molecules: Optional[List[str]] = None,
         lig_resname: str = "UNL",
-        n_protein_res: int = 706,
+        n_protein_res: Optional[int] = None,
         run_prolif: bool = True,
         cpptraj_timeout: int = 600,
         cpptraj_solvated_timeout: int = 3600,
+        water_bridge_stride: int = 10,
         reparse_only: bool = False,
 ) -> Dict:
     """
@@ -785,6 +1027,7 @@ def run_trajectory_analysis_batch(
                 run_prolif=run_prolif,
                 cpptraj_timeout=cpptraj_timeout,
                 cpptraj_solvated_timeout=cpptraj_solvated_timeout,
+                water_bridge_stride=water_bridge_stride,
                 reparse_only=reparse_only,
             )
             all_results[mol_name] = result
@@ -804,4 +1047,171 @@ def run_trajectory_analysis_batch(
         "n_ok": n_ok,
         "n_failed": n_fail,
         "results": all_results,
+    }
+
+
+# =============================================================================
+# REPLICA CONSOLIDATION
+# =============================================================================
+
+def consolidate_trajectory_analysis_replicas(
+    replica_dirs: List[Path],
+    output_dir: Path,
+    representative_per_mol_csv: Path,
+) -> Dict:
+    """
+    Consolidate trajectory outputs across N replicas.
+
+    Outputs in output_dir:
+      - rmsd_summary.csv: per-molecule cross-replica RMSD stats:
+            Name, max_rmsd_across_replicas, mean_max_rmsd, std_max_rmsd,
+            mean_avg_rmsd, std_avg_rmsd, n_replicas_used.
+      - <molecule>/: symlink to representative replica's full per-molecule output
+            (rmsd_ligand.csv, rmsf_per_residue.csv, hbond_occupancy.csv, etc.)
+
+    Per-replica layout:
+      - <replica>/01i_trajectory_analysis/<molecule>/rmsd_ligand.csv  (frame, value)
+      - <replica>/01i_trajectory_analysis/<molecule>/{rmsd_receptor, rmsf_per_residue, ...}.csv
+    """
+    from hit_validation.utils.replica_consolidation_helpers import (
+        compute_mean_std_sem, link_or_copy, load_representative_per_mol,
+    )
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not replica_dirs:
+        return {"success": False, "error": "No replica dirs provided"}
+
+    rep_per_mol = load_representative_per_mol(representative_per_mol_csv)
+
+    # 1. rmsd_summary.csv — cross-replica per-molecule stats
+    rmsd_per_mol: Dict[str, Dict[int, Dict[str, float]]] = {}
+    for rd in replica_dirs:
+        try:
+            rep_id = int(rd.name.split("_")[1])
+        except (IndexError, ValueError):
+            continue
+        traj_dir = rd / "01i_trajectory_analysis"
+        if not traj_dir.exists():
+            continue
+        for mol_dir in traj_dir.iterdir():
+            if not mol_dir.is_dir():
+                continue
+            mol = mol_dir.name
+            rmsd_csv = mol_dir / "rmsd_ligand.csv"
+            if not rmsd_csv.exists():
+                continue
+            try:
+                df = pd.read_csv(rmsd_csv)
+                rmsd_col = "value" if "value" in df.columns else df.columns[-1]
+                values = df[rmsd_col].dropna()
+                if len(values) == 0:
+                    continue
+                rmsd_per_mol.setdefault(mol, {})[rep_id] = {
+                    "max_rmsd": float(values.max()),
+                    "mean_rmsd": float(values.mean()),
+                }
+            except Exception as e:
+                logger.warning(f"Failed to parse {rmsd_csv}: {e}")
+
+    summary_rows = []
+    for mol, per_rep in rmsd_per_mol.items():
+        max_rmsds = [v["max_rmsd"] for v in per_rep.values()]
+        mean_rmsds = [v["mean_rmsd"] for v in per_rep.values()]
+        max_stats = compute_mean_std_sem(max_rmsds)
+        mean_stats = compute_mean_std_sem(mean_rmsds)
+        summary_rows.append({
+            "Name": mol,
+            "max_rmsd_across_replicas": max(max_rmsds) if max_rmsds else float("nan"),
+            "mean_max_rmsd": max_stats["mean"],
+            "std_max_rmsd": max_stats["std"],
+            "mean_avg_rmsd": mean_stats["mean"],
+            "std_avg_rmsd": mean_stats["std"],
+            "n_replicas_used": len(per_rep),
+        })
+
+    if summary_rows:
+        pd.DataFrame(summary_rows).to_csv(output_dir / "rmsd_summary.csv", index=False)
+        logger.info(
+            f"01i consolidation: rmsd_summary.csv with {len(summary_rows)} molecules"
+        )
+
+    # 2. Symlink per-molecule directories from representative replica
+    n_linked = 0
+    shared_base = replica_dirs[0].parent
+    for mol, rep_id in rep_per_mol.items():
+        src = shared_base / f"replica_{rep_id}" / "01i_trajectory_analysis" / mol
+        if not src.exists():
+            logger.warning(f"Missing 01i for {mol} in replica_{rep_id}: {src}")
+            continue
+        dst = output_dir / mol
+        link_or_copy(src, dst)
+        n_linked += 1
+    logger.info(f"01i consolidation: symlinked {n_linked} molecule dirs to representative")
+
+    return {
+        "success": True,
+        "n_molecules": len(rmsd_per_mol),
+        "n_linked": n_linked,
+        "output_dir": str(output_dir),
+    }
+
+
+# =============================================================================
+# PER-FRAME DISTANCE REPLICA CONSOLIDATION (added v2.0, 2026-04-27)
+# =============================================================================
+
+def consolidate_distances_per_frame_replicas(
+        campaign_results_base: Union[str, Path],
+        molecule_name: str,
+        n_replicas: int,
+        output_csv: Union[str, Path],
+) -> Dict[str, Any]:
+    """
+    Consolidate distances_per_frame across N replicas.
+    Output: mean ± std for each distance column at each frame.
+    """
+    base = Path(campaign_results_base)
+
+    replica_dfs = []
+    for r in range(1, n_replicas + 1):
+        csv_path = (
+            base / f"replica_{r}" / "01i_trajectory_analysis" / molecule_name
+            / "distances_per_frame.csv"
+        )
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+            df["replica"] = r
+            replica_dfs.append(df)
+
+    if not replica_dfs:
+        return {"success": False, "error": "No replica distance CSVs found"}
+
+    combined = pd.concat(replica_dfs, ignore_index=True)
+    numeric_cols = [c for c in combined.columns if c not in ("frame", "time_ns", "replica")]
+
+    agg_dict = {col: ['mean', 'std'] for col in numeric_cols}
+    agg_dict['time_ns'] = 'first'
+
+    grouped = combined.groupby("frame").agg(agg_dict).reset_index()
+
+    new_cols = []
+    for col in grouped.columns:
+        if isinstance(col, tuple):
+            if col[1] == 'first':
+                new_cols.append(col[0])
+            else:
+                new_cols.append(f"{col[0]}_{col[1]}")
+        else:
+            new_cols.append(col)
+    grouped.columns = new_cols
+
+    grouped.to_csv(output_csv, index=False)
+
+    return {
+        "success": True,
+        "n_frames": len(grouped),
+        "n_replicas_found": len(replica_dfs),
+        "output_csv": str(output_csv),
     }

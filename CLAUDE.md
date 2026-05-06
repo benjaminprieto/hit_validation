@@ -114,7 +114,45 @@ hit_validation/
 
 ### Module Numbering = Execution Order
 
-Pipeline: `00a -> 00b -> 00d -> 01b -> 01c -> 01d -> 01f -> 01e -> 03a -> 04b -> 07a`
+Pipeline: `00a -> 00b -> 00d -> 01b -> 01c -> 01d -> 01f -> 01e -> 03a -> 04b -> 01g -> 01h -> 01i -> [consolidation, only when N>1] -> 06a -> 06b -> 07a -> 07b -> 07c -> 07d`
+
+When `n_replicas > 1`, modules 01c through 01i run N times under `replica_*/`,
+then per-module `--consolidate-replicas` produces `<module>/consolidated/` and
+`_replica_metadata/representative_per_mol.csv`. Post-replica modules
+(06a, 06b, 07a, 07b, 07c, 07d) read from `<module>/consolidated/`.
+
+---
+
+## Configuration: `n_replicas`
+
+Each campaign's number of replicas is determined by precedence:
+
+1. **`campaign_config.yaml`** — most specific (recommended for new campaigns).
+2. **`03_configs/pipeline_config.yaml`** — fallback global.
+3. **Default** — `1` if neither defines it.
+
+Recommended: define `n_replicas` explicitly in each campaign_config to ensure traceability:
+
+```yaml
+# 04_data/campaigns/<campaign_id>/campaign_config.yaml
+campaign_id: "..."
+# ... other fields ...
+n_replicas: 3   # 1 for legacy single-run, N>1 for replicated UQ
+```
+
+The `pipeline_config.yaml` retains `n_replicas` as a fallback for backward
+compatibility, but new campaigns should define it per-campaign.
+
+`run_pipeline.sh` echoes `[CONFIG] n_replicas = <N> (source: <campaign_config|pipeline_config (fallback)>)`
+at startup so the chosen value and its source are auditable in the run log.
+
+Helpers under `02_scripts/utils/`:
+
+- `audit_campaign_ids.py` — verifies that the internal `campaign_id` of every
+  `campaign_config.yaml` matches its directory name. Run before relaunching a
+  campaign to catch copy-paste bugs.
+- `migrate_n_replicas_to_campaign_configs.py` — idempotent; appends
+  `n_replicas: <default>` to any campaign_config that does not have it yet.
 
 ---
 
@@ -248,6 +286,8 @@ Key campaign config sections:
 
 ## Output Structure
 
+Single-run mode (`n_replicas: 1`):
+
 ```
 05_results/{campaign_id}/
 +-  00a_ligand_preparation/     # {name}/{name}.mol2, preparation_status.csv
@@ -259,12 +299,42 @@ Key campaign config sections:
 +-  01f_gbsa_rescore/           # {name}/{name}_gbsa_scored.mol2
 +-  01e_score_collection/       # dock6_scores.csv, dock6_all_poses.csv, best_poses/
 +-  03a_plip_analysis/          # {name}/interactions.json, plip_summary_all.csv
-+-  04_dock6_analysis/
-|   +-- 04b_footprint_analysis/ # footprint_per_molecule.csv, residue_consensus.csv,
++-  04b_footprint_analysis/     # footprint_per_molecule.csv, residue_consensus.csv,
 |                                # subpocket_coverage.csv, ranking_by_zone.csv
 +-- 07a_decision_report/        # decision_report.html, decision_summary.csv,
                                  # pose_selection_summary.csv, selected_poses/
 ```
+
+Replicated mode (`n_replicas > 1`):
+
+```
+05_results/{campaign_id}/
++-  00a_ligand_preparation/         # SHARED (single run)
++-  00b_receptor_preparation/       # SHARED
++-  00d_binding_site/               # SHARED
++-  01b_grid_generation/            # SHARED
++-  replica_1/                      # one full pipeline output per replica:
+|   +-  01c_dock6_run/              #   01c, 01d, 01f, 01e, 03a, 04b, 01g, 01h, 01i
+|   +-  01e_score_collection/
+|   +-  ...
++-  replica_2/                      # idem
++-  replica_N/                      # idem
++-  _replica_metadata/              # operational metadata (underscore = not science)
+|   +-- representative_per_mol.csv  # which replica per molecule is closest to mean dG
++-  01c_dock6_run/consolidated/     # symlinks-per-mol to representative replica
++-  01e_score_collection/consolidated/  # dock6_scores.csv with mean +/- std +/- sem
++-  03a_plip_analysis/consolidated/      # symlinks-per-mol to representative
++-  04b_footprint_analysis/consolidated/ # mean +/- std per (mol, residue),
+|                                        # residue_consensus, residue_mapping (link)
++-  01h_mmpbsa_analysis/consolidated/    # consolidated_mmpbsa.csv with mean +/- std,
+|                                        # per_residue_decomp.csv consolidated.
++-  01i_trajectory_analysis/consolidated/ # rmsd_summary.csv + symlinks-per-mol
++-- 07a_decision_report/                  # consumes consolidated/ outputs above
+```
+
+Module 07f (replica consolidation) was eliminated 2026-04-27. Its responsibilities
+moved into per-module `--consolidate-replicas` flags. The discordant-vs-consistent
+verdict (formerly produced by 07f) is delegated to 07c in Fase D.
 
 ## Dependencies
 
@@ -283,10 +353,43 @@ Key campaign config sections:
 - DOCK6 (academic license from UCSF, installed at `/opt/dock6/`)
 - ChimeraX (`/usr/bin/chimerax-daily`)
 
-**Server paths:**
-- DOCK6: `/opt/dock6/`
-- ChimeraX: `/usr/bin/chimerax-daily`
-- Working dir: `/home/bprieto/hit_validation/`
+**Server paths (defaults; overridable via env vars / YAMLs — see `docs/INSTALL.md`):**
+- DOCK6: `/opt/dock6/` (override with `$DOCK_HOME`)
+- ChimeraX: `/usr/bin/chimerax-daily` (or any binary named `chimerax-daily`/`chimerax`/`ChimeraX` on `$PATH`)
+- Working dir on the original dev box: `/home/bprieto/projects/hit_validation/` (the repo is path-agnostic, just `cd` into the clone)
+
+## Per-frame Analysis
+
+The pipeline computes per-frame metrics from MD trajectories:
+
+- **ΔG per frame** (01h): GB and PB energies extracted from MMPBSA sander outputs
+  (`_MMPBSA_<species>_<gb|pb>.mdout.0`).
+  Output: `<mol>_dG_per_frame.csv` per molecule with columns
+  `frame, time_ns, dG_GB, vdW_GB, EEL_GB, EGB, ESURF, dG_PB, vdW_PB, EEL_PB, EPB, nonpolar_PB`.
+- **Distances per frame** (01i): `d_min` (atom-atom minimum) and `d_func` (to chemically
+  relevant atoms, see `FUNCTIONAL_ATOMS`) for residues in `functional_residues` of campaign_config.
+  Output: `distances_per_frame.csv` per molecule.
+
+Both modules produce mean ± std consolidations across N replicas via
+`consolidate_dG_per_frame_replicas()` (01h) and
+`consolidate_distances_per_frame_replicas()` (01i).
+
+### Config
+
+`03_configs/01g_mmpbsa_decomp.yaml`:
+- `production_ns: 50.0` — MD production length.
+- `mmpbsa_interval_ps: 1000.0` — 1 MMPBSA point per ns (50 points total).
+- `mmpbsa.istrng/fillratio/radiopt` — PB parameters (PB runs alongside GB).
+
+### Outputs
+
+Per replica:
+- `replica_N/01h_mmpbsa_analysis/<mol>_dG_per_frame.csv`
+- `replica_N/01i_trajectory_analysis/<mol>/distances_per_frame.csv`
+
+Consolidated (N≥2 replicas):
+- `01h_mmpbsa_analysis/<mol>_dG_per_frame_consolidated.csv` (mean ± std × replicas)
+- `01i_trajectory_analysis/<mol>/distances_per_frame_consolidated.csv`
 
 ## Testing
 
